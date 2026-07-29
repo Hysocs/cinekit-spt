@@ -1,0 +1,31 @@
+{
+  "Name": "Straight - Short",
+  "Points": [
+    {
+      "Position": [0.0, 0.0, 0.0],
+      "LookTarget": [0.0, 0.0, 20.0],
+      "InTangent": [0.0, 0.0, 0.0],
+      "OutTangent": [0.0, 0.0, 6.667],
+      "Speed": 6.0,
+      "StartDelay": 0.0,
+      "StopDelay": 0.0,
+      "Acceleration": 4.0,
+      "Deceleration": 4.0,
+      "NextPoint": 1,
+      "StopHere": false
+    },
+    {
+      "Position": [0.0, 0.0, 20.0],
+      "LookTarget": [0.0, 0.0, 40.0],
+      "InTangent": [0.0, 0.0, -6.667],
+      "OutTangent": [0.0, 0.0, 0.0],
+      "Speed": 6.0,
+      "StartDelay": 0.0,
+      "StopDelay": 0.0,
+      "Acceleration": 4.0,
+      "Deceleration": 4.0,
+      "NextPoint": -1,
+      "StopHere": true
+    }
+  ]
+}

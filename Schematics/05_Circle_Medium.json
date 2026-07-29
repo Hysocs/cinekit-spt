@@ -1,0 +1,9 @@
+{
+  "Name": "Circle Loop - Medium",
+  "Points": [
+    {"Position":[0,0,0],"LookTarget":[0,0,30],"InTangent":[-16.569,0,0],"OutTangent":[16.569,0,0],"Speed":12,"StartDelay":0,"StopDelay":0,"Acceleration":7,"Deceleration":7,"NextPoint":1,"StopHere":false},
+    {"Position":[30,0,30],"LookTarget":[0,0,30],"InTangent":[0,0,-16.569],"OutTangent":[0,0,16.569],"Speed":12,"StartDelay":0,"StopDelay":0,"Acceleration":7,"Deceleration":7,"NextPoint":2,"StopHere":false},
+    {"Position":[0,0,60],"LookTarget":[0,0,30],"InTangent":[16.569,0,0],"OutTangent":[-16.569,0,0],"Speed":12,"StartDelay":0,"StopDelay":0,"Acceleration":7,"Deceleration":7,"NextPoint":3,"StopHere":false},
+    {"Position":[-30,0,30],"LookTarget":[0,0,30],"InTangent":[0,0,16.569],"OutTangent":[0,0,-16.569],"Speed":12,"StartDelay":0,"StopDelay":0,"Acceleration":7,"Deceleration":7,"NextPoint":0,"StopHere":false}
+  ]
+}

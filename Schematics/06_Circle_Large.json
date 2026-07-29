@@ -1,0 +1,9 @@
+{
+  "Name": "Circle Loop - Large",
+  "Points": [
+    {"Position":[0,0,0],"LookTarget":[0,0,75],"InTangent":[-41.421,0,0],"OutTangent":[41.421,0,0],"Speed":25,"StartDelay":0,"StopDelay":0,"Acceleration":12,"Deceleration":12,"NextPoint":1,"StopHere":false},
+    {"Position":[75,0,75],"LookTarget":[0,0,75],"InTangent":[0,0,-41.421],"OutTangent":[0,0,41.421],"Speed":25,"StartDelay":0,"StopDelay":0,"Acceleration":12,"Deceleration":12,"NextPoint":2,"StopHere":false},
+    {"Position":[0,0,150],"LookTarget":[0,0,75],"InTangent":[41.421,0,0],"OutTangent":[-41.421,0,0],"Speed":25,"StartDelay":0,"StopDelay":0,"Acceleration":12,"Deceleration":12,"NextPoint":3,"StopHere":false},
+    {"Position":[-75,0,75],"LookTarget":[0,0,75],"InTangent":[0,0,41.421],"OutTangent":[0,0,-41.421],"Speed":25,"StartDelay":0,"StopDelay":0,"Acceleration":12,"Deceleration":12,"NextPoint":0,"StopHere":false}
+  ]
+}
