@@ -1,0 +1,1 @@
+Place ffmpeg.exe in this folder to enable CineKit MP4 recording with game audio.

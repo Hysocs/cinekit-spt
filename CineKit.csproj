@@ -42,6 +42,7 @@
     <Compile Remove="Client\**\*.cs" />
     <Compile Remove="ExamplePatches\**\*.cs" />
     <Content Include="Schematics\**\*.json" />
+    <FfmpegNotice Include="Add ffmpeg.exe into this folder.txt" />
     <Reference Include="PhysicsModule">
       <HintPath>..\..\EscapeFromTarkov_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
     </Reference>
@@ -142,6 +143,9 @@
     <Copy SourceFiles="@(Content)"
           DestinationFiles="@(Content->'$(CineKitClientInstallDir)\Schematics\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(FfmpegNotice)"
+          DestinationFolder="$(CineKitClientInstallDir)"
+          SkipUnchangedFiles="true" />
   </Target>
 
   <Target Name="CreateCineKitReleasePackage"
@@ -158,6 +162,8 @@
           DestinationFolder="$(CineKitPackageRoot)\BepInEx\plugins\Hysocs-CineKit" />
     <Copy SourceFiles="@(Content)"
           DestinationFiles="@(Content->'$(CineKitPackageRoot)\BepInEx\plugins\Hysocs-CineKit\Schematics\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy SourceFiles="@(FfmpegNotice)"
+          DestinationFolder="$(CineKitPackageRoot)\BepInEx\plugins\Hysocs-CineKit" />
 
     <ZipDirectory SourceDirectory="$(CineKitPackageRoot)"
                   DestinationFile="$(CineKitPackageZip)"

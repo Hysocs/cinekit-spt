@@ -64,8 +64,6 @@ namespace CineKit
         private bool _menuOpen;
         private bool _menuShortcutLatched;
         private bool _fieldKitConflictResolved;
-        private bool _delayFreecamOnLoad;
-        private float _freecamActivationTime = -1f;
         private Rect _windowRect = new Rect(
             30f, 30f, 1000f, 820f);
         private CursorLockMode _savedCursorLock;
@@ -327,7 +325,8 @@ namespace CineKit
                 new KeyboardShortcut(KeyCode.Minus),
                 "Remove the selected camera point while freecam is active.");
             _freecamEnabled = Config.Bind("Free Camera", "Enabled", false,
-                "Disconnect the camera from the player body.");
+                "Disconnect the camera from the player body. Automatically " +
+                "turns off outside an active raid.");
             _moveSpeed = Config.Bind("Free Camera", "Move Speed", 6f,
                 new ConfigDescription("Normal movement speed.",
                     new AcceptableValueRange<float>(0.5f, 50f)));
@@ -398,7 +397,6 @@ namespace CineKit
             ConfigureToggleHotkeys();
             _windowRect.x = _windowX.Value;
             _windowRect.y = _windowY.Value;
-            _delayFreecamOnLoad = _freecamEnabled.Value;
             AddPathGroup();
             LoadPathTemplatesFromConfig();
             _freecamEnabled.SettingChanged += OnFreecamSettingChanged;
@@ -419,6 +417,7 @@ namespace CineKit
 
         private void Update()
         {
+            DisableFreecamOutsideRaid();
             UpdateToggleHotkeys();
             CaptureAwaitingMovementKey();
             UpdatePathEditingHotkeys();
@@ -511,15 +510,6 @@ namespace CineKit
                 : null;
             if (source == null)
                 return false;
-            if (_delayFreecamOnLoad)
-            {
-                if (_freecamActivationTime < 0f)
-                    _freecamActivationTime = Time.unscaledTime + 1f;
-                if (Time.unscaledTime < _freecamActivationTime)
-                    return false;
-                _delayFreecamOnLoad = false;
-                _freecamActivationTime = -1f;
-            }
 
             Transform sourceTransform = source.transform;
             _sourceCamera = source;
@@ -2161,18 +2151,23 @@ namespace CineKit
             _indoorCullersScanned = false;
         }
 
+        private void DisableFreecamOutsideRaid()
+        {
+            if (!_freecamEnabled.Value)
+                return;
+            GameWorld world = Singleton<GameWorld>.Instance;
+            if (world == null || world.MainPlayer == null)
+                _freecamEnabled.Value = false;
+        }
+
         private void OnFreecamSettingChanged(object sender, EventArgs args)
         {
             if (_freecamEnabled.Value)
             {
-                _delayFreecamOnLoad = false;
-                _freecamActivationTime = -1f;
                 EnsureFreeCamera();
             }
             else
             {
-                _delayFreecamOnLoad = false;
-                _freecamActivationTime = -1f;
                 RestoreCamera();
             }
         }
