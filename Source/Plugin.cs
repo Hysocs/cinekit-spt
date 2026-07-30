@@ -27,6 +27,8 @@ namespace CineKit
         public const string Version = "1.0.0";
 
         private ConfigEntry<KeyboardShortcut> _menuKey;
+        private ConfigEntry<KeyboardShortcut> _addPointKey;
+        private ConfigEntry<KeyboardShortcut> _removePointKey;
         private ConfigEntry<bool> _freecamEnabled;
         private ConfigEntry<float> _moveSpeed;
         private ConfigEntry<float> _sprintSpeed;
@@ -57,6 +59,7 @@ namespace CineKit
                 new Dictionary<
                     ConfigEntry<bool>, ConfigEntry<KeyboardShortcut>>();
         private ConfigEntry<bool> _toggleAwaitingHotkey;
+        private ConfigEntry<KeyboardShortcut> _standaloneAwaitingHotkey;
         private int _toggleHotkeyCaptureStartedFrame = -1;
         private bool _menuOpen;
         private bool _menuShortcutLatched;
@@ -109,7 +112,10 @@ namespace CineKit
             9, 11, 10, 11, 10, 12, 11, 12, 11, 13, 12, 13, 12, 14
         };
         private static readonly string[] PanelNames =
-            { "CAMERA", "PATH", "SCHEMATICS", "RECORDING / PLAY POINTS" };
+        {
+            "CAMERA", "PATH", "SCHEMATICS",
+            "RECORDING / PLAY POINTS", "OTHER"
+        };
         private static readonly string[] AntialiasingNames =
             { "Gameplay", "Off", "FXAA", "TAA Low", "TAA High" };
         private static readonly string[] RecordingFpsNames =
@@ -126,6 +132,7 @@ namespace CineKit
         private int _renderPoseFrame = -1;
         private Harmony _harmony;
         private GUISkin _skin;
+        private bool _skinRefreshPending;
         private GUIStyle _headingStyle;
         private GUIStyle _tabStyle;
         private readonly List<Texture2D> _textures = new List<Texture2D>();
@@ -311,6 +318,14 @@ namespace CineKit
             _instance = this;
             _menuKey = Config.Bind("Hotkeys", "Toggle Menu",
                 new KeyboardShortcut(KeyCode.Home), "Open or close the CineKit menu.");
+            _addPointKey = Config.Bind(
+                "Hotkeys", "Add Camera Point",
+                new KeyboardShortcut(KeyCode.Plus),
+                "Add a point to the selected path group while freecam is active.");
+            _removePointKey = Config.Bind(
+                "Hotkeys", "Remove Camera Point",
+                new KeyboardShortcut(KeyCode.Minus),
+                "Remove the selected camera point while freecam is active.");
             _freecamEnabled = Config.Bind("Free Camera", "Enabled", false,
                 "Disconnect the camera from the player body.");
             _moveSpeed = Config.Bind("Free Camera", "Move Speed", 6f,
@@ -406,6 +421,7 @@ namespace CineKit
         {
             UpdateToggleHotkeys();
             CaptureAwaitingMovementKey();
+            UpdatePathEditingHotkeys();
             UpdateGrassDistanceRefresh();
             if (!_fieldKitConflictResolved)
                 _fieldKitConflictResolved = ResolveFieldKitHomeConflict();
@@ -2546,6 +2562,19 @@ namespace CineKit
             }
         }
 
+        private void UpdatePathEditingHotkeys()
+        {
+            if (_menuOpen || !IsFreecamActive ||
+                _pathPlaying || _recordingPath)
+                return;
+            if (_addPointKey.Value.IsDown())
+                AddPathPoint();
+            if (_removePointKey.Value.IsDown() &&
+                _selectedPathPoint >= 0 &&
+                _selectedPathPoint < _pathPoints.Count)
+                DeleteSelectedPathPoint();
+        }
+
         private void UpdateToggleHotkeys()
         {
             CaptureAwaitingToggleHotkey();
@@ -2568,13 +2597,16 @@ namespace CineKit
 
         private void CaptureAwaitingToggleHotkey()
         {
-            if (_toggleAwaitingHotkey == null ||
+            if ((_toggleAwaitingHotkey == null &&
+                 _standaloneAwaitingHotkey == null) ||
                 Time.frameCount <= _toggleHotkeyCaptureStartedFrame ||
                 !Input.anyKeyDown)
                 return;
-            if (!_toggleHotkeys.TryGetValue(
-                    _toggleAwaitingHotkey,
-                    out ConfigEntry<KeyboardShortcut> hotkey))
+            ConfigEntry<KeyboardShortcut> hotkey;
+            if (_standaloneAwaitingHotkey != null)
+                hotkey = _standaloneAwaitingHotkey;
+            else if (!_toggleHotkeys.TryGetValue(
+                         _toggleAwaitingHotkey, out hotkey))
             {
                 FinishToggleHotkeyCapture();
                 return;
@@ -2593,6 +2625,8 @@ namespace CineKit
                     continue;
                 hotkey.Value = new KeyboardShortcut(
                     key, CurrentHotkeyModifiers());
+                if (ReferenceEquals(hotkey, _menuKey))
+                    _menuShortcutLatched = true;
                 FinishToggleHotkeyCapture();
                 return;
             }
@@ -2601,7 +2635,27 @@ namespace CineKit
         private void FinishToggleHotkeyCapture()
         {
             _toggleAwaitingHotkey = null;
+            _standaloneAwaitingHotkey = null;
             _toggleHotkeyCaptureStartedFrame = -1;
+        }
+
+        private void DrawStandaloneHotkey(
+            ConfigEntry<KeyboardShortcut> hotkey)
+        {
+            string label = ReferenceEquals(
+                    _standaloneAwaitingHotkey, hotkey)
+                ? "[Press key]"
+                : FormatToggleHotkey(hotkey.Value);
+            if (GUILayout.Button(
+                    label, GUI.skin.label,
+                    GUILayout.Width(110f)))
+            {
+                FinishMovementKeyCapture();
+                _toggleAwaitingHotkey = null;
+                _standaloneAwaitingHotkey = hotkey;
+                _toggleHotkeyCaptureStartedFrame =
+                    Time.frameCount;
+            }
         }
 
         private void DrawToggleWithHotkey(
@@ -2617,6 +2671,7 @@ namespace CineKit
                     label, GUI.skin.label, GUILayout.Width(100f)))
             {
                 FinishMovementKeyCapture();
+                _standaloneAwaitingHotkey = null;
                 _toggleAwaitingHotkey = toggle;
                 _toggleHotkeyCaptureStartedFrame = Time.frameCount;
             }
@@ -2753,8 +2808,10 @@ namespace CineKit
                 DrawPathPanel();
             else if (_selectedPanel == 2)
                 DrawSchematicsPanel();
-            else
+            else if (_selectedPanel == 3)
                 DrawRecordingPanel();
+            else
+                DrawOtherPanel();
             GUILayout.Space(28f);
             GUILayout.EndScrollView();
             GUILayout.EndVertical();
@@ -3130,6 +3187,105 @@ namespace CineKit
                       " points in " +
                       _pathGroups[_selectedPathGroup].Name + "."
                     : "Add at least two points in the Path tab first.");
+        }
+
+        private void DrawOtherPanel()
+        {
+            GUILayout.BeginVertical(GUI.skin.box);
+            GUILayout.Label("MENU OPTIONS", _headingStyle);
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Open / Close Menu");
+            GUILayout.FlexibleSpace();
+            DrawStandaloneHotkey(_menuKey);
+            GUILayout.EndHorizontal();
+            GUILayout.Label(
+                "Click the binding and press a keyboard key. " +
+                "Escape clears it.");
+
+            GUILayout.Space(10f);
+            GUILayout.Label("PATH EDITING HOTKEYS", _headingStyle);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Add Point");
+            GUILayout.FlexibleSpace();
+            DrawStandaloneHotkey(_addPointKey);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Remove Selected Point");
+            GUILayout.FlexibleSpace();
+            DrawStandaloneHotkey(_removePointKey);
+            GUILayout.EndHorizontal();
+            GUILayout.Label(
+                "These work with the menu closed while freecam is active.");
+
+            GUILayout.Space(10f);
+            GUILayout.Label("GUI PRIMARY COLOR", _headingStyle);
+            Color accent;
+            if (!ColorUtility.TryParseHtmlString(
+                    _accentColor.Value, out accent))
+                accent = new Color32(120, 207, 245, 255);
+
+            GUILayout.BeginHorizontal();
+            Color previous = GUI.color;
+            GUI.color = accent;
+            GUILayout.Box(
+                GUIContent.none,
+                GUILayout.Width(48f),
+                GUILayout.Height(48f));
+            GUI.color = previous;
+            GUILayout.BeginVertical();
+            GUILayout.Label("Hex RGBA");
+            string hex = GUILayout.TextField(
+                _accentColor.Value,
+                GUILayout.Width(180f));
+            if (!string.Equals(
+                    hex, _accentColor.Value,
+                    StringComparison.Ordinal))
+                _accentColor.Value = hex;
+            GUILayout.EndVertical();
+            GUILayout.EndHorizontal();
+
+            float red = DrawColorChannel("Red", accent.r);
+            float green = DrawColorChannel("Green", accent.g);
+            float blue = DrawColorChannel("Blue", accent.b);
+            float alpha = DrawColorChannel("Alpha", accent.a);
+            Color edited = new Color(red, green, blue, alpha);
+            if (edited != accent)
+                _accentColor.Value =
+                    "#" + ColorUtility.ToHtmlStringRGBA(edited);
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Reset Color"))
+                _accentColor.Value = "#78CFF5FF";
+            if (GUILayout.Button("Reset Menu Key"))
+                _menuKey.Value =
+                    new KeyboardShortcut(KeyCode.Home);
+            if (GUILayout.Button("Reset Point Keys"))
+            {
+                _addPointKey.Value =
+                    new KeyboardShortcut(KeyCode.Plus);
+                _removePointKey.Value =
+                    new KeyboardShortcut(KeyCode.Minus);
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Label(
+                "The primary color updates tabs, sliders, checkboxes, " +
+                "headings, and highlighted controls.");
+            GUILayout.EndVertical();
+        }
+
+        private static float DrawColorChannel(
+            string label, float value)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(
+                label + ": " +
+                Mathf.RoundToInt(value * 255f),
+                GUILayout.Width(100f));
+            value = GUILayout.HorizontalSlider(
+                value, 0f, 1f);
+            GUILayout.EndHorizontal();
+            return value;
         }
 
         private void DrawSchematicsPanel()
@@ -4328,6 +4484,11 @@ namespace CineKit
 
         private void EnsureSkin()
         {
+            if (_skinRefreshPending)
+            {
+                _skinRefreshPending = false;
+                DestroySkin();
+            }
             if (_skin != null)
                 return;
 
@@ -4647,7 +4808,9 @@ namespace CineKit
             style.onFocused.textColor = activeText;
         }
 
-        private void OnAccentChanged(object sender, EventArgs args) => DestroySkin();
+        private void OnAccentChanged(
+            object sender, EventArgs args) =>
+            _skinRefreshPending = true;
 
         private void DestroySkin()
         {
