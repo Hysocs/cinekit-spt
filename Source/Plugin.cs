@@ -176,6 +176,9 @@ namespace CineKit
         private float _pathStartDelayRemaining;
         private float _pathStopDelayRemaining;
         private float _pathSegmentProgress;
+        private float _pathTotalDurationScale = 1f;
+        private float _pathDistanceCarry;
+        private float _pathTimeCarry;
         private int _worldDragPoint = -1;
         private int _worldDragHandle = -1;
         private int _worldHoverPoint = -1;
@@ -242,6 +245,12 @@ namespace CineKit
             DLSS_UltraPerformance
         }
 
+        private enum SchematicSpace
+        {
+            CameraRelative,
+            WorldCoordinates
+        }
+
         private sealed class CameraPathPoint
         {
             public Vector3 Position;
@@ -249,6 +258,7 @@ namespace CineKit
             public Vector3 InTangent;
             public Vector3 OutTangent;
             public float Speed = 6f;
+            public float SegmentDuration;
             public float StartDelay;
             public float StopDelay;
             public float Acceleration = 4f;
@@ -262,12 +272,17 @@ namespace CineKit
             public string Name;
             public readonly List<CameraPathPoint> Points =
                 new List<CameraPathPoint>();
+            public float TotalDuration;
+            public bool SmoothTransitions;
         }
 
         [Serializable]
         private sealed class SavedPathTemplate
         {
             public string Name;
+            public SchematicSpace Space;
+            public float TotalDuration;
+            public bool SmoothTransitions;
             public List<SavedPathPoint> Points =
                 new List<SavedPathPoint>();
             [JsonIgnore]
@@ -282,6 +297,7 @@ namespace CineKit
             public float[] InTangent;
             public float[] OutTangent;
             public float Speed;
+            public float SegmentDuration;
             public float StartDelay;
             public float StopDelay;
             public float Acceleration;
@@ -517,7 +533,7 @@ namespace CineKit
             SyncPlayerToFreeCamera();
             ApplyFreecamGraphicsProfile();
             ApplyGrassRenderDistance();
-            RefreshGrassSpatialPartitioning();
+            ScheduleGrassSpatialRefresh();
             ApplyFreeCameraPose();
             Camera.onPreCull += OnCameraPreCull;
             Camera.onPostRender += OnCameraPostRender;
@@ -916,19 +932,32 @@ namespace CineKit
             return true;
         }
 
-        private void SaveCurrentPathTemplate()
+        private void SaveCurrentPathTemplate(SchematicSpace space)
         {
-            if (_pathPoints.Count == 0 ||
+            if (_pathPoints.Count == 0)
+                return;
+            bool relative =
+                space == SchematicSpace.CameraRelative;
+            Vector3 origin = Vector3.zero;
+            Quaternion anchorRotation = Quaternion.identity;
+            if (relative &&
                 !TryGetCameraAnchor(
-                    out Vector3 origin,
-                    out Quaternion anchorRotation))
+                    out origin, out anchorRotation))
                 return;
 
             string name = string.IsNullOrWhiteSpace(_templateName)
                 ? "Path " + (_savedPathTemplates.Count + 1)
                 : _templateName.Trim();
             SavedPathTemplate template =
-                new SavedPathTemplate { Name = name };
+                new SavedPathTemplate
+                {
+                    Name = name,
+                    Space = space,
+                    TotalDuration =
+                        _pathGroups[_selectedPathGroup].TotalDuration,
+                    SmoothTransitions =
+                        _pathGroups[_selectedPathGroup].SmoothTransitions
+                };
             Quaternion inverse = Quaternion.Inverse(anchorRotation);
             foreach (CameraPathPoint point in _pathPoints)
             {
@@ -943,6 +972,7 @@ namespace CineKit
                     OutTangent = ToArray(
                         inverse * point.OutTangent),
                     Speed = point.Speed,
+                    SegmentDuration = point.SegmentDuration,
                     StartDelay = point.StartDelay,
                     StopDelay = point.StopDelay,
                     Acceleration = point.Acceleration,
@@ -974,18 +1004,25 @@ namespace CineKit
         private void LoadSelectedPathTemplate()
         {
             if (_selectedTemplate < 0 ||
-                _selectedTemplate >= _savedPathTemplates.Count ||
-                !TryGetCameraAnchor(
-                    out Vector3 origin,
-                    out Quaternion anchorRotation))
+                _selectedTemplate >= _savedPathTemplates.Count)
                 return;
 
             SavedPathTemplate template =
                 _savedPathTemplates[_selectedTemplate];
+            Vector3 origin = Vector3.zero;
+            Quaternion anchorRotation = Quaternion.identity;
+            if (template.Space == SchematicSpace.CameraRelative &&
+                !TryGetCameraAnchor(
+                    out origin, out anchorRotation))
+                return;
             AddPathGroup();
             CameraPathGroup group =
                 _pathGroups[_selectedPathGroup];
             group.Name = template.Name;
+            group.TotalDuration =
+                Mathf.Max(0f, template.TotalDuration);
+            group.SmoothTransitions =
+                template.SmoothTransitions;
             group.Points.Clear();
             foreach (SavedPathPoint saved in template.Points)
             {
@@ -1005,6 +1042,8 @@ namespace CineKit
                     OutTangent =
                         anchorRotation * FromArray(saved.OutTangent),
                     Speed = Mathf.Max(0.1f, saved.Speed),
+                    SegmentDuration =
+                        Mathf.Max(0f, saved.SegmentDuration),
                     StartDelay = Mathf.Max(0f, saved.StartDelay),
                     StopDelay = Mathf.Max(0f, saved.StopDelay),
                     Acceleration =
@@ -1064,6 +1103,10 @@ namespace CineKit
             _pathSegment = 0;
             _pathCurrentSpeed = 0f;
             _pathSegmentProgress = 0f;
+            _pathDistanceCarry = 0f;
+            _pathTimeCarry = 0f;
+            _pathTotalDurationScale =
+                CalculateTotalDurationScale();
             _pathStartDelayRemaining =
                 _pathPoints[0].StartDelay;
             _pathStopDelayRemaining = 0f;
@@ -1075,6 +1118,9 @@ namespace CineKit
             _pathPlaying = false;
             _hidePathElementsDuringPlayback = false;
             _pathCurrentSpeed = 0f;
+            _pathDistanceCarry = 0f;
+            _pathTimeCarry = 0f;
+            _pathTotalDurationScale = 1f;
             _pathStartDelayRemaining = 0f;
             _pathStopDelayRemaining = 0f;
         }
@@ -1481,14 +1527,8 @@ namespace CineKit
             }
             CameraPathPoint to = _pathPoints[nextIndex];
             float segmentLength =
-                EstimateBezierLength(from, to);
-            float remaining =
-                segmentLength * (1f - _pathSegmentProgress);
-            float maxSpeed = Mathf.Max(0.1f, from.Speed);
-            float acceleration =
-                Mathf.Max(0.1f, from.Acceleration);
-            float deceleration =
-                Mathf.Max(0.1f, from.Deceleration);
+                EstimatePlaybackSegmentLength(
+                    _pathSegment, nextIndex);
             bool finalSegment =
                 !_pathLoop.Value &&
                 (to.NextPoint < 0 ||
@@ -1499,23 +1539,54 @@ namespace CineKit
                 to.StopHere ||
                 to.StartDelay > 0f ||
                 to.StopDelay > 0f;
-            float desiredSpeed = maxSpeed;
-            if (mustStopAtPoint)
+            float timedDuration = GetTimedSegmentDuration(
+                from, to, segmentLength);
+            if (timedDuration > 0f)
             {
-                float brakingSpeed = Mathf.Sqrt(
-                    2f * deceleration * remaining);
-                desiredSpeed = Mathf.Min(
-                    maxSpeed, brakingSpeed);
+                float rawProgress =
+                    _pathSegmentProgress +
+                    (delta + _pathTimeCarry) / timedDuration;
+                _pathTimeCarry = rawProgress > 1f
+                    ? (rawProgress - 1f) * timedDuration
+                    : 0f;
+                _pathSegmentProgress =
+                    Mathf.Clamp01(rawProgress);
             }
-            _pathCurrentSpeed = Mathf.MoveTowards(
-                _pathCurrentSpeed, desiredSpeed,
-                acceleration * delta);
-            _pathSegmentProgress = Mathf.Clamp01(
-                _pathSegmentProgress +
-                Mathf.Max(0.05f, _pathCurrentSpeed) *
-                delta / Mathf.Max(0.001f, segmentLength));
-            _freePosition = EvaluateBezier(
-                from, to, _pathSegmentProgress);
+            else
+            {
+                float remaining =
+                    segmentLength * (1f - _pathSegmentProgress);
+                float maxSpeed = Mathf.Max(0.1f, from.Speed);
+                float acceleration =
+                    Mathf.Max(0.1f, from.Acceleration);
+                float deceleration =
+                    Mathf.Max(0.1f, from.Deceleration);
+                float desiredSpeed = maxSpeed;
+                if (mustStopAtPoint)
+                {
+                    float brakingSpeed = Mathf.Sqrt(
+                        2f * deceleration * remaining);
+                    desiredSpeed = Mathf.Min(
+                        maxSpeed, brakingSpeed);
+                }
+                _pathCurrentSpeed = Mathf.MoveTowards(
+                    _pathCurrentSpeed, desiredSpeed,
+                    acceleration * delta);
+                float distance =
+                    Mathf.Max(0.05f, _pathCurrentSpeed) *
+                    delta + _pathDistanceCarry;
+                float rawProgress =
+                    _pathSegmentProgress +
+                    distance / Mathf.Max(0.001f, segmentLength);
+                _pathDistanceCarry = rawProgress > 1f
+                    ? (rawProgress - 1f) * segmentLength
+                    : 0f;
+                _pathSegmentProgress =
+                    Mathf.Clamp01(rawProgress);
+            }
+            _freePosition = EvaluatePlaybackSegment(
+                _pathSegment, nextIndex,
+                _pathSegmentProgress);
 
             Quaternion rotation = Quaternion.Slerp(
                 GetPointRotation(from),
@@ -1536,6 +1607,10 @@ namespace CineKit
             if (mustStopAtPoint)
                 _pathCurrentSpeed = 0f;
             _pathSegmentProgress = 0f;
+            if (timedDuration > 0f)
+                _pathDistanceCarry = 0f;
+            else
+                _pathTimeCarry = 0f;
             _pathStopDelayRemaining = to.StopDelay;
             _pathStartDelayRemaining =
                 finalSegment
@@ -1566,15 +1641,79 @@ namespace CineKit
             CameraPathPoint to,
             float t)
         {
-            float u = 1f - t;
             Vector3 p0 = from.Position;
             Vector3 p1 = from.Position + from.OutTangent;
             Vector3 p2 = to.Position + to.InTangent;
             Vector3 p3 = to.Position;
+            return EvaluateCubic(p0, p1, p2, p3, t);
+        }
+
+        private static Vector3 EvaluateCubic(
+            Vector3 p0, Vector3 p1,
+            Vector3 p2, Vector3 p3, float t)
+        {
+            float u = 1f - t;
             return u * u * u * p0 +
                    3f * u * u * t * p1 +
                    3f * u * t * t * p2 +
                    t * t * t * p3;
+        }
+
+        private Vector3 EvaluatePlaybackSegment(
+            int fromIndex, int toIndex, float t)
+        {
+            CameraPathPoint from = _pathPoints[fromIndex];
+            CameraPathPoint to = _pathPoints[toIndex];
+            if (_selectedPathGroup < 0 ||
+                _selectedPathGroup >= _pathGroups.Count ||
+                !_pathGroups[_selectedPathGroup].SmoothTransitions)
+                return EvaluateBezier(from, to, t);
+
+            Vector3 previous = from.Position;
+            for (int i = 0; i < _pathPoints.Count; i++)
+                if (_pathPoints[i].NextPoint == fromIndex)
+                {
+                    previous = _pathPoints[i].Position;
+                    break;
+                }
+            if (previous == from.Position && fromIndex > 0)
+                previous = _pathPoints[fromIndex - 1].Position;
+
+            Vector3 following = to.Position;
+            int afterIndex = to.NextPoint;
+            if (afterIndex >= 0 &&
+                afterIndex < _pathPoints.Count &&
+                afterIndex != toIndex)
+                following = _pathPoints[afterIndex].Position;
+            else if (toIndex + 1 < _pathPoints.Count)
+                following = _pathPoints[toIndex + 1].Position;
+
+            Vector3 p0 = from.Position;
+            Vector3 p1 =
+                p0 + (to.Position - previous) / 6f;
+            Vector3 p3 = to.Position;
+            Vector3 p2 =
+                p3 + (from.Position - following) / 6f;
+            return EvaluateCubic(p0, p1, p2, p3, t);
+        }
+
+        private float EstimatePlaybackSegmentLength(
+            int fromIndex, int toIndex)
+        {
+            const int samples = 16;
+            float length = 0f;
+            Vector3 previous =
+                _pathPoints[fromIndex].Position;
+            for (int i = 1; i <= samples; i++)
+            {
+                Vector3 current = EvaluatePlaybackSegment(
+                    fromIndex, toIndex,
+                    i / (float)samples);
+                length += Vector3.Distance(
+                    previous, current);
+                previous = current;
+            }
+            return Mathf.Max(0.001f, length);
         }
 
         private static float EstimateBezierLength(
@@ -1592,6 +1731,76 @@ namespace CineKit
                 previous = current;
             }
             return Mathf.Max(0.001f, length);
+        }
+
+        private float CalculateTotalDurationScale()
+        {
+            if (_selectedPathGroup < 0 ||
+                _selectedPathGroup >= _pathGroups.Count)
+                return 1f;
+            CameraPathGroup group =
+                _pathGroups[_selectedPathGroup];
+            if (group.TotalDuration <= 0f ||
+                group.Points.Count < 2)
+                return 1f;
+
+            float naturalTotal = 0f;
+            HashSet<int> visited = new HashSet<int>();
+            int index = 0;
+            while (index >= 0 &&
+                   index < group.Points.Count &&
+                   visited.Add(index))
+            {
+                CameraPathPoint from = group.Points[index];
+                int next = from.NextPoint;
+                if (next < 0 ||
+                    next >= group.Points.Count ||
+                    next == index)
+                {
+                    if (!_pathLoop.Value)
+                        break;
+                    next = 0;
+                }
+                CameraPathPoint to = group.Points[next];
+                naturalTotal += GetNaturalSegmentDuration(
+                    from, to,
+                    EstimatePlaybackSegmentLength(
+                        index, next));
+                index = next;
+            }
+            return group.TotalDuration /
+                   Mathf.Max(0.001f, naturalTotal);
+        }
+
+        private float GetTimedSegmentDuration(
+            CameraPathPoint from,
+            CameraPathPoint to,
+            float length)
+        {
+            CameraPathGroup group =
+                _selectedPathGroup >= 0 &&
+                _selectedPathGroup < _pathGroups.Count
+                    ? _pathGroups[_selectedPathGroup]
+                    : null;
+            if (group != null && group.TotalDuration > 0f)
+                return GetNaturalSegmentDuration(
+                           from, to, length) *
+                       _pathTotalDurationScale;
+            return from.SegmentDuration > 0f
+                ? from.SegmentDuration
+                : 0f;
+        }
+
+        private static float GetNaturalSegmentDuration(
+            CameraPathPoint from,
+            CameraPathPoint to,
+            float length)
+        {
+            if (from.SegmentDuration > 0f)
+                return from.SegmentDuration;
+            float movementTime =
+                length / Mathf.Max(0.1f, from.Speed);
+            return Mathf.Max(0.001f, movementTime);
         }
 
         private void ApplyRotation(Quaternion rotation)
@@ -1670,9 +1879,8 @@ namespace CineKit
                 Vector3 previous = _pathPoints[i].Position;
                 for (int sample = 1; sample <= 24; sample++)
                 {
-                    Vector3 current = EvaluateBezier(
-                        _pathPoints[i], _pathPoints[target],
-                        sample / 24f);
+                    Vector3 current = EvaluatePlaybackSegment(
+                        i, target, sample / 24f);
                     GL.Vertex(previous);
                     GL.Vertex(current);
                     previous = current;
@@ -1995,8 +2203,13 @@ namespace CineKit
             if (!_cameraDetached)
                 return;
             ApplyGrassRenderDistance();
+            ScheduleGrassSpatialRefresh();
+        }
+
+        private void ScheduleGrassSpatialRefresh()
+        {
             _grassRefreshPending = true;
-            _grassRefreshTime = Time.unscaledTime + 0.25f;
+            _grassRefreshTime = Time.unscaledTime + 1f;
         }
 
         private void UpdateGrassDistanceRefresh()
@@ -2005,8 +2218,7 @@ namespace CineKit
                 Time.unscaledTime < _grassRefreshTime)
                 return;
             _grassRefreshPending = false;
-            if (_cameraDetached)
-                RefreshGrassSpatialPartitioning();
+            RefreshGrassSpatialPartitioning();
         }
 
         private void ApplyGrassRenderDistance()
@@ -2089,8 +2301,7 @@ namespace CineKit
                 entry.Key.maxDistanceOptic = entry.Value.OpticMaximum;
             }
             _grassPrototypeDistanceStates.Clear();
-            _grassRefreshPending = false;
-            RefreshGrassSpatialPartitioning();
+            ScheduleGrassSpatialRefresh();
         }
 
         private static GraphicsSettingsClass GetGraphicsSettings()
@@ -2532,8 +2743,10 @@ namespace CineKit
             GUILayout.Space(8f);
             _panelScroll = GUILayout.BeginScrollView(
                 _panelScroll,
+                false,
+                true,
                 GUILayout.Height(Mathf.Max(
-                    120f, _windowRect.height - 145f)));
+                    120f, _windowRect.height - 205f)));
             if (_selectedPanel == 0)
                 DrawCameraPanel();
             else if (_selectedPanel == 1)
@@ -2542,6 +2755,7 @@ namespace CineKit
                 DrawSchematicsPanel();
             else
                 DrawRecordingPanel();
+            GUILayout.Space(28f);
             GUILayout.EndScrollView();
             GUILayout.EndVertical();
             GUI.DragWindow(new Rect(0f, 0f, _windowRect.width, 28f));
@@ -2672,23 +2886,6 @@ namespace CineKit
         private void DrawPathPanel()
         {
             GUILayout.BeginHorizontal();
-            GUI.enabled = _pathPoints.Count >= 2;
-            if (!_pathPlaying)
-            {
-                if (GUILayout.Button("Preview Path"))
-                    StartPathPlayback(false);
-            }
-            else if (GUILayout.Button("Stop Preview"))
-            {
-                StopPathPlayback();
-            }
-            GUI.enabled = true;
-            DrawToggleWithHotkey(_pathLoop, "Loop");
-            GUILayout.EndHorizontal();
-            if (_pathPlaying)
-                GUILayout.Label("Close the UI to begin pathing.");
-
-            GUILayout.BeginHorizontal();
             GUILayout.BeginVertical(
                 GUI.skin.box, GUILayout.Width(220f));
             GUILayout.Label("GROUPS", _headingStyle);
@@ -2752,7 +2949,35 @@ namespace CineKit
             GUILayout.EndVertical();
             GUILayout.EndHorizontal();
 
+            if (_selectedPathGroup >= 0 &&
+                _selectedPathGroup < _pathGroups.Count)
+            {
+                CameraPathGroup timingGroup =
+                    _pathGroups[_selectedPathGroup];
+                GUILayout.BeginHorizontal();
+                GUILayout.BeginVertical();
+                DrawPointSlider(
+                    "Total Path Duration",
+                    ref timingGroup.TotalDuration,
+                    0f, 600f, " s");
+                GUILayout.EndVertical();
+                timingGroup.SmoothTransitions = GUILayout.Toggle(
+                    timingGroup.SmoothTransitions,
+                    "Smooth Transitions",
+                    GUILayout.Width(190f));
+                GUILayout.EndHorizontal();
+                GUILayout.Label(
+                    timingGroup.TotalDuration > 0f
+                        ? "Overrides individual segment timing and scales " +
+                          "the complete connected chain to this duration."
+                        : "0 seconds uses each segment's duration or speed.");
+                if (timingGroup.SmoothTransitions)
+                    GUILayout.Label(
+                        "Blends connected points into one continuous curve.");
+            }
+
             DrawSelectedPointInspector();
+            DrawSelectedPointStartStop();
 
             GUILayout.BeginHorizontal();
             GUI.enabled = _selectedPathPoint >= 0 &&
@@ -2768,14 +2993,6 @@ namespace CineKit
             if (GUILayout.Button(
                     "Set Point looking direction to location"))
                 SetSelectedLookTarget();
-            GUI.enabled = _pathPoints.Count > 0;
-            if (GUILayout.Button(
-                    "Delete All points in Group"))
-            {
-                StopPathPlayback();
-                _pathPoints.Clear();
-                _selectedPathPoint = -1;
-            }
             GUI.enabled = true;
             GUILayout.EndHorizontal();
 
@@ -2783,6 +3000,53 @@ namespace CineKit
                 "Close the menu and aim the center dot at a handle. " +
                 "Hold left click to grab it; fly/look to move it and " +
                 "use the wheel for depth.");
+            GUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            GUILayout.BeginVertical(GUILayout.Width(220f));
+            GUI.enabled = _pathPoints.Count >= 2;
+            if (!_pathPlaying)
+            {
+                if (GUILayout.Button(
+                        "Preview Path",
+                        GUILayout.Width(220f)))
+                    StartPathPlayback(false);
+            }
+            else if (GUILayout.Button(
+                         "Stop Preview",
+                         GUILayout.Width(220f)))
+            {
+                StopPathPlayback();
+            }
+            GUI.enabled = true;
+            if (_pathPlaying)
+                GUILayout.Label(
+                    "Close the UI to begin pathing.",
+                    GUILayout.Width(220f));
+            GUILayout.EndVertical();
+            GUILayout.BeginVertical(GUILayout.Width(250f));
+            DrawToggleWithHotkey(_pathLoop, "Loop");
+            GUILayout.EndVertical();
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawSelectedPointStartStop()
+        {
+            if (_selectedPathPoint < 0 ||
+                _selectedPathPoint >= _pathPoints.Count)
+                return;
+            CameraPathPoint point =
+                _pathPoints[_selectedPathPoint];
+            GUILayout.BeginVertical(GUI.skin.box);
+            GUILayout.Label(
+                "POINT " + (_selectedPathPoint + 1) +
+                " — START / STOP", _headingStyle);
+            DrawPointSlider(
+                "Start Delay", ref point.StartDelay,
+                0f, 10f, " s");
+            DrawPointSlider(
+                "Stop Delay", ref point.StopDelay,
+                0f, 10f, " s");
+            GUILayout.EndVertical();
         }
 
         private void DrawRecordingPanel()
@@ -2873,15 +3137,22 @@ namespace CineKit
             GUILayout.BeginVertical(GUI.skin.box);
             GUILayout.Label("PATH SCHEMATICS", _headingStyle);
             GUILayout.Label("SCHEMATIC NAME");
-            GUILayout.BeginHorizontal();
             _templateName = GUILayout.TextField(_templateName);
+            GUILayout.BeginHorizontal();
             GUI.enabled = _pathPoints.Count > 0;
             if (GUILayout.Button(
-                    "Copy Current Points into Schematic",
-                    GUILayout.Width(260f)))
-                SaveCurrentPathTemplate();
+                    "Copy Points as Camera Relative"))
+                SaveCurrentPathTemplate(
+                    SchematicSpace.CameraRelative);
+            if (GUILayout.Button(
+                    "Copy Points as World Coordinates"))
+                SaveCurrentPathTemplate(
+                    SchematicSpace.WorldCoordinates);
             GUI.enabled = true;
             GUILayout.EndHorizontal();
+            GUILayout.Label(
+                "Camera Relative uses the current camera as its anchor. " +
+                "World Coordinates preserves the exact map positions.");
 
             GUILayout.Space(8f);
             GUILayout.BeginHorizontal();
@@ -2896,7 +3167,12 @@ namespace CineKit
                         _savedPathTemplates[i].Name +
                         " (" +
                         _savedPathTemplates[i].Points.Count +
-                        " points)",
+                        " points, " +
+                        (_savedPathTemplates[i].Space ==
+                         SchematicSpace.CameraRelative
+                            ? "Relative"
+                            : "World") +
+                        ")",
                         GUI.skin.button))
                 {
                     _selectedTemplate = i;
@@ -2916,6 +3192,12 @@ namespace CineKit
                 GUILayout.Label(selected.Name);
                 GUILayout.Label(
                     selected.Points.Count + " camera points");
+                GUILayout.Label(
+                    "Type: " +
+                    (selected.Space ==
+                     SchematicSpace.CameraRelative
+                        ? "Camera Relative"
+                        : "World Coordinates"));
                 GUILayout.Space(8f);
             }
             else
@@ -2924,8 +3206,14 @@ namespace CineKit
                     "Select a schematic from the list.");
             }
             GUI.enabled = hasSelection;
+            string spawnLabel =
+                hasSelection &&
+                _savedPathTemplates[_selectedTemplate].Space ==
+                SchematicSpace.WorldCoordinates
+                    ? "Spawn at Saved World Position"
+                    : "Spawn at Current Position";
             if (GUILayout.Button(
-                    "Spawn at Current Position",
+                    spawnLabel,
                     GUILayout.Height(34f)))
                 LoadSelectedPathTemplate();
             if (GUILayout.Button("Delete Schematic"))
@@ -2936,9 +3224,9 @@ namespace CineKit
             GUILayout.EndHorizontal();
 
             GUILayout.Label(
-                "Schematics are saved relative to the free camera's " +
-                "position and facing. Fly to the desired anchor, face " +
-                "the intended direction, then load one on any map.");
+                "Camera Relative schematics use the free camera as their " +
+                "anchor. World Coordinates schematics preserve their exact " +
+                "map positions when saved and spawned.");
             GUILayout.Label(
                 "JSON files are stored in Hysocs-CineKit/Schematics " +
                 "so they can be shared or included in a release.");
@@ -3008,11 +3296,13 @@ namespace CineKit
             DrawPointSlider(
                 "Speed", ref point.Speed, 0.5f, 100f, " m/s");
             DrawPointSlider(
-                "Start Delay", ref point.StartDelay,
-                0f, 10f, " s");
-            DrawPointSlider(
-                "Stop Delay", ref point.StopDelay,
-                0f, 10f, " s");
+                "Segment Duration", ref point.SegmentDuration,
+                0f, 120f, " s");
+            GUILayout.Label(
+                point.SegmentDuration > 0f
+                    ? "This segment reaches its next point and facing " +
+                      "in the selected number of seconds."
+                    : "0 seconds uses movement speed.");
             DrawPointSlider(
                 "Acceleration", ref point.Acceleration,
                 0.1f, 25f, " m/s²");
@@ -3982,8 +4272,7 @@ namespace CineKit
             if (plugin == null || !plugin.IsFreecamActive)
                 return;
             plugin.ApplyGrassRenderDistance(__instance);
-            if (__instance.isInitialized)
-                __instance.InitializeSpatialPartitioning();
+            plugin.ScheduleGrassSpatialRefresh();
         }
 
         private static void ReapplyFreeCameraPose()
