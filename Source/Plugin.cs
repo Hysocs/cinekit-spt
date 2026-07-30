@@ -129,7 +129,7 @@ namespace CineKit
         private static readonly string[] PanelNames =
         {
             "CAMERA", "PATH", "SCHEMATICS",
-            "RECORDING / PLAY POINTS", "OTHER"
+            "RECORD / PLAY", "OTHER"
         };
         private static readonly string[] AntialiasingNames =
             { "Gameplay", "Off", "FXAA", "TAA Low", "TAA High" };
