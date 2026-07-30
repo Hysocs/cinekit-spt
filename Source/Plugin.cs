@@ -126,6 +126,9 @@ namespace CineKit
                 typeof(EFT.UI.PreloaderUI), "_alphaVersionLabel");
         private GameObject _hiddenVersionLabel;
         private GameObject _hiddenClientWatermark;
+        private readonly Dictionary<GameObject, bool>
+            _hiddenBattleStancePanels =
+                new Dictionary<GameObject, bool>();
         private bool _versionLabelWasActive;
         private bool _clientWatermarkWasActive;
         private bool _freecamWatermarksHidden;
@@ -1179,6 +1182,10 @@ namespace CineKit
                 if (_hiddenClientWatermark != null &&
                     _hiddenClientWatermark.activeSelf)
                     _hiddenClientWatermark.SetActive(false);
+                foreach (GameObject panel
+                             in _hiddenBattleStancePanels.Keys)
+                    if (panel != null && panel.activeSelf)
+                        panel.SetActive(false);
                 return;
             }
             EFT.UI.PreloaderUI preloader =
@@ -1206,6 +1213,20 @@ namespace CineKit
                 _hiddenVersionLabel.SetActive(false);
             if (_hiddenClientWatermark != null)
                 _hiddenClientWatermark.SetActive(false);
+            EFT.UI.BattleStancePanel[] stancePanels =
+                Resources.FindObjectsOfTypeAll<
+                    EFT.UI.BattleStancePanel>();
+            for (int i = 0; i < stancePanels.Length; i++)
+            {
+                EFT.UI.BattleStancePanel panel = stancePanels[i];
+                if (panel == null ||
+                    !panel.gameObject.scene.IsValid())
+                    continue;
+                GameObject panelObject = panel.gameObject;
+                _hiddenBattleStancePanels[panelObject] =
+                    panelObject.activeSelf;
+                panelObject.SetActive(false);
+            }
             _freecamWatermarksHidden = true;
         }
 
@@ -1219,6 +1240,11 @@ namespace CineKit
             if (_hiddenClientWatermark != null)
                 _hiddenClientWatermark.SetActive(
                     _clientWatermarkWasActive);
+            foreach (KeyValuePair<GameObject, bool> entry
+                         in _hiddenBattleStancePanels)
+                if (entry.Key != null)
+                    entry.Key.SetActive(entry.Value);
+            _hiddenBattleStancePanels.Clear();
             _hiddenVersionLabel = null;
             _hiddenClientWatermark = null;
             _freecamWatermarksHidden = false;
