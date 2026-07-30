@@ -46,6 +46,12 @@
     <Reference Include="PhysicsModule">
       <HintPath>..\..\EscapeFromTarkov_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
     </Reference>
+    <Reference Include="UnityEngine.TerrainPhysicsModule">
+      <HintPath>..\..\EscapeFromTarkov_Data\Managed\UnityEngine.TerrainPhysicsModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.TerrainModule">
+      <HintPath>..\..\EscapeFromTarkov_Data\Managed\UnityEngine.TerrainModule.dll</HintPath>
+    </Reference>
     <Reference Include="0Harmony">
       <HintPath>..\..\BepInEx\core\0Harmony.dll</HintPath>
     </Reference>

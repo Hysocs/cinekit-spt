@@ -45,6 +45,8 @@ namespace CineKit
         private ConfigEntry<float> _rotationSmoothing;
         private ConfigEntry<float> _lodDistanceMultiplier;
         private ConfigEntry<float> _grassRenderDistance;
+        private ConfigEntry<bool> _extendedCrossSceneMeshes;
+        private ConfigEntry<float> _crossSceneMeshDistance;
         private ConfigEntry<bool> _showCrosshair;
         private ConfigEntry<bool> _playerFollowsFreecam;
         private ConfigEntry<bool> _controlPlayerFromFreecam;
@@ -93,8 +95,23 @@ namespace CineKit
         private int _movementKeyCaptureStartedFrame = -1;
         private readonly List<DisablerCullingObjectBase> _indoorCullers =
             new List<DisablerCullingObjectBase>();
+        private readonly List<Terrain> _mapTerrains =
+            new List<Terrain>();
         private readonly HashSet<int> _indoorCullingStates =
             new HashSet<int>();
+        private readonly HashSet<
+            Koenigz.PerfectCulling.EFT.PerfectCullingCrossSceneGroup>
+            _crossSceneMeshGroups =
+                new HashSet<
+                    Koenigz.PerfectCulling.EFT
+                        .PerfectCullingCrossSceneGroup>();
+        private readonly Dictionary<
+            Koenigz.PerfectCulling.EFT.PerfectCullingCrossSceneGroup,
+            bool> _crossSceneGroupCullingStates =
+                new Dictionary<
+                    Koenigz.PerfectCulling.EFT
+                        .PerfectCullingCrossSceneGroup, bool>();
+        private bool _crossSceneMeshScanNeeded = true;
         private float _nextIndoorCullingEvaluation;
         private bool _indoorCullersScanned;
         private Vector3 _lastEnvironmentCullingPosition;
@@ -119,8 +136,8 @@ namespace CineKit
         private static readonly string[] RecordingFpsNames =
             { "Native FPS", "Custom FPS" };
         private static readonly GUIContent FreecamContent = new GUIContent(
-            "Freecam",
-            "Disconnect the view from the player while leaving the body in place.");
+            "Freecam — Enable in raid after loading finishes",
+            "Freecam can only be enabled after the raid has fully started.");
         private Vector3 _freePosition;
         private float _yaw;
         private float _pitch;
@@ -366,6 +383,14 @@ namespace CineKit
                 new ConfigDescription(
                     "Maximum freecam grass/detail distance in world meters.",
                     new AcceptableValueRange<float>(25f, 500f)));
+            _extendedCrossSceneMeshes = Config.Bind(
+                "Free Camera", "Extended Cross-Scene Meshes", true,
+                "Keep nearby Perfect Culling cross-scene mesh groups visible.");
+            _crossSceneMeshDistance = Config.Bind(
+                "Free Camera", "Cross-Scene Mesh Distance", 250f,
+                new ConfigDescription(
+                    "Freecam range for cross-scene rocks and map mesh groups.",
+                    new AcceptableValueRange<float>(100f, 3000f)));
             _showCrosshair = Config.Bind(
                 "Free Camera", "Show Crosshair", true,
                 "Show the center-dot crosshair while controlling freecam.");
@@ -492,6 +517,7 @@ namespace CineKit
             SyncPlayerToFreeCamera();
             UpdateEnvironmentCullingPosition();
             UpdateIndoorCullingPosition();
+            UpdateCrossSceneMeshVisibility();
             ApplyFreeCameraPose();
         }
 
@@ -499,6 +525,8 @@ namespace CineKit
         {
             if (_cameraDetached && _gameCamera != null)
                 return true;
+            if (!IsRaidRunning())
+                return false;
 
             GameWorld world = Singleton<GameWorld>.Instance;
             if (world == null || world.MainPlayer == null)
@@ -2043,6 +2071,7 @@ namespace CineKit
             {
                 _indoorCullersScanned = true;
                 _indoorCullers.Clear();
+                _mapTerrains.Clear();
                 DisablerCullingObjectBase[] found =
                     Resources.FindObjectsOfTypeAll<DisablerCullingObjectBase>();
                 foreach (DisablerCullingObjectBase culler in found)
@@ -2050,7 +2079,15 @@ namespace CineKit
                     if (culler != null &&
                         culler.gameObject.activeInHierarchy &&
                         culler.isActiveAndEnabled)
+                    {
                         _indoorCullers.Add(culler);
+                        DisablerTerrainCullingObject terrainCuller =
+                            culler as DisablerTerrainCullingObject;
+                        if (terrainCuller != null &&
+                            terrainCuller.Terrain != null &&
+                            !_mapTerrains.Contains(terrainCuller.Terrain))
+                            _mapTerrains.Add(terrainCuller.Terrain);
+                    }
                 }
             }
 
@@ -2124,14 +2161,50 @@ namespace CineKit
             {
                 if (collider == null || !collider.enabled)
                     continue;
-                Vector3 samplePosition = cameraPosition;
                 Bounds bounds = collider.bounds;
+                if (culler is DisablerTerrainCullingObject &&
+                    collider is TerrainCollider &&
+                    cameraPosition.x >= bounds.min.x &&
+                    cameraPosition.x <= bounds.max.x &&
+                    cameraPosition.z >= bounds.min.z &&
+                    cameraPosition.z <= bounds.max.z)
+                    return true;
+                Vector3 samplePosition = cameraPosition;
                 if (samplePosition.y > bounds.max.y)
+                {
+                    if (IsTerrainBetween(
+                            samplePosition, bounds))
+                        continue;
                     samplePosition.y = Mathf.Max(
                         bounds.min.y,
                         bounds.max.y - 0.01f);
+                }
                 if ((collider.ClosestPoint(samplePosition) - samplePosition)
                         .sqrMagnitude <= 0.000001f)
+                    return true;
+            }
+            return false;
+        }
+
+        private bool IsTerrainBetween(
+            Vector3 cameraPosition, Bounds volumeBounds)
+        {
+            for (int i = 0; i < _mapTerrains.Count; i++)
+            {
+                Terrain terrain = _mapTerrains[i];
+                if (terrain == null || terrain.terrainData == null)
+                    continue;
+                Vector3 origin = terrain.transform.position;
+                Vector3 size = terrain.terrainData.size;
+                if (cameraPosition.x < origin.x ||
+                    cameraPosition.x > origin.x + size.x ||
+                    cameraPosition.z < origin.z ||
+                    cameraPosition.z > origin.z + size.z)
+                    continue;
+                float surfaceHeight =
+                    terrain.SampleHeight(cameraPosition) + origin.y;
+                if (surfaceHeight > volumeBounds.center.y + 0.5f &&
+                    surfaceHeight < cameraPosition.y)
                     return true;
             }
             return false;
@@ -2144,6 +2217,7 @@ namespace CineKit
                     _indoorCullingStates.Contains(culler.GetInstanceID()))
                     culler.SetComponentsEnabled(culler.HasEntered);
             _indoorCullers.Clear();
+            _mapTerrains.Clear();
             _indoorCullingStates.Clear();
             _hasEnvironmentCullingPosition = false;
             _lastEnvironmentCullingFrame = -1;
@@ -2151,13 +2225,150 @@ namespace CineKit
             _indoorCullersScanned = false;
         }
 
+        private void UpdateCrossSceneMeshVisibility()
+        {
+            if (!_extendedCrossSceneMeshes.Value)
+            {
+                RestoreCrossSceneMeshVisibility();
+                return;
+            }
+            if (_crossSceneMeshScanNeeded)
+            {
+                _crossSceneMeshScanNeeded = false;
+                Koenigz.PerfectCulling.EFT
+                    .PerfectCullingCrossSceneContentMeshes[] contents =
+                    Resources.FindObjectsOfTypeAll<
+                        Koenigz.PerfectCulling.EFT
+                            .PerfectCullingCrossSceneContentMeshes>();
+                for (int i = 0; i < contents.Length; i++)
+                {
+                    Koenigz.PerfectCulling.EFT
+                        .PerfectCullingCrossSceneContentMeshes content =
+                        contents[i];
+                    if (content != null &&
+                        content.RuntimeCullingGroup != null)
+                        _crossSceneMeshGroups.Add(
+                            content.RuntimeCullingGroup);
+                }
+            }
+
+            Vector3 cameraPosition = CurrentCameraPosition;
+            float rangeSqr =
+                _crossSceneMeshDistance.Value *
+                _crossSceneMeshDistance.Value;
+            foreach (Koenigz.PerfectCulling.EFT
+                         .PerfectCullingCrossSceneGroup group
+                     in _crossSceneMeshGroups)
+            {
+                if (group == null)
+                    continue;
+                Bounds bounds = group.GroupBoundingBox;
+                Vector3 sample = cameraPosition;
+                sample.y = Mathf.Clamp(
+                    sample.y, bounds.min.y, bounds.max.y);
+                if (bounds.SqrDistance(sample) <= rangeSqr)
+                {
+                    if (!_crossSceneGroupCullingStates
+                            .ContainsKey(group))
+                        ForceCrossSceneGroupVisible(group);
+                }
+                else
+                    RestoreCrossSceneGroup(group);
+            }
+        }
+
+        private void AddCrossSceneMeshContent(
+            Koenigz.PerfectCulling.EFT
+                .PerfectCullingCrossSceneContentMeshes content)
+        {
+            if (content != null &&
+                content.RuntimeCullingGroup != null)
+                _crossSceneMeshGroups.Add(
+                    content.RuntimeCullingGroup);
+        }
+
+        private void ForceCrossSceneGroupVisible(
+            Koenigz.PerfectCulling.EFT
+                .PerfectCullingCrossSceneGroup group)
+        {
+            if (!_crossSceneGroupCullingStates.ContainsKey(group))
+                _crossSceneGroupCullingStates.Add(
+                    group, group.allowGroupCulling);
+            group.allowGroupCulling = false;
+            Koenigz.PerfectCulling.PerfectCullingBakeGroup[] bakeGroups =
+                group.bakeGroups;
+            if (bakeGroups == null)
+                return;
+            for (int i = 0; i < bakeGroups.Length; i++)
+            {
+                Koenigz.PerfectCulling.PerfectCullingBakeGroup bakeGroup =
+                    bakeGroups[i];
+                if (bakeGroup == null)
+                    continue;
+                bakeGroup.RuntimeSetForceRenderingOff(false);
+                bakeGroup.Toggle(true);
+            }
+        }
+
+        private static bool IsCrossSceneGroupVisible(
+            Koenigz.PerfectCulling.EFT
+                .PerfectCullingCrossSceneGroup group)
+        {
+            if (group.allowGroupCulling)
+                return false;
+            Koenigz.PerfectCulling.PerfectCullingBakeGroup[] bakeGroups =
+                group.bakeGroups;
+            if (bakeGroups == null)
+                return true;
+            for (int i = 0; i < bakeGroups.Length; i++)
+                if (bakeGroups[i] != null &&
+                    !bakeGroups[i].IsEnabled)
+                    return false;
+            return true;
+        }
+
+        private void RestoreCrossSceneGroup(
+            Koenigz.PerfectCulling.EFT
+                .PerfectCullingCrossSceneGroup group)
+        {
+            if (group == null ||
+                !_crossSceneGroupCullingStates.TryGetValue(
+                    group, out bool allowCulling))
+                return;
+            group.allowGroupCulling = allowCulling;
+            _crossSceneGroupCullingStates.Remove(group);
+        }
+
+        private void RestoreCrossSceneMeshVisibility()
+        {
+            foreach (KeyValuePair<
+                         Koenigz.PerfectCulling.EFT
+                             .PerfectCullingCrossSceneGroup, bool> entry
+                     in _crossSceneGroupCullingStates)
+                if (entry.Key != null)
+                    entry.Key.allowGroupCulling = entry.Value;
+            _crossSceneGroupCullingStates.Clear();
+            _crossSceneMeshGroups.Clear();
+            _crossSceneMeshScanNeeded = true;
+        }
+
         private void DisableFreecamOutsideRaid()
         {
             if (!_freecamEnabled.Value)
                 return;
-            GameWorld world = Singleton<GameWorld>.Instance;
-            if (world == null || world.MainPlayer == null)
+            if (!IsRaidRunning())
                 _freecamEnabled.Value = false;
+        }
+
+        private static bool IsRaidRunning()
+        {
+            AbstractGame game =
+                Singleton<AbstractGame>.Instance;
+            return game != null &&
+                   game.InRaid &&
+                   game.GameTimer != null &&
+                   game.GameTimer.Status ==
+                   GameTimerClass.EGameTimerStatus.Started;
         }
 
         private void OnFreecamSettingChanged(object sender, EventArgs args)
@@ -2440,6 +2651,7 @@ namespace CineKit
             }
             RestorePlayerCullingPosition();
             RestoreIndoorCulling();
+            RestoreCrossSceneMeshVisibility();
             bool wasActive = _cameraDetached;
             _cameraDetached = false;
             _gameCamera = null;
@@ -2875,6 +3087,24 @@ namespace CineKit
                 _grassRenderDistance.Value, 25f, 500f);
             GUILayout.Label(
                 "Freecam-only GPU-instanced grass and terrain detail range.");
+            GUILayout.Space(8f);
+            DrawToggleWithHotkey(
+                _extendedCrossSceneMeshes,
+                "Extended Cross-Scene Meshes");
+            if (_extendedCrossSceneMeshes.Value)
+            {
+                GUILayout.Label(
+                    "Cross-Scene Mesh Range: " +
+                    Mathf.RoundToInt(
+                        _crossSceneMeshDistance.Value) + " m");
+                _crossSceneMeshDistance.Value =
+                    GUILayout.HorizontalSlider(
+                        _crossSceneMeshDistance.Value,
+                        100f, 3000f);
+                GUILayout.Label(
+                    "Keeps nearby Perfect Culling rock and map-mesh " +
+                    "groups visible outside their baked visibility cells.");
+            }
             GUILayout.Space(8f);
             GUILayout.Label("FREECAM ANTIALIASING", _headingStyle);
             _freecamAntialiasing.Value =
@@ -4301,6 +4531,18 @@ namespace CineKit
                 "OnPreCull"), nameof(ExtendCameraLodDistance), true);
             Patch(AccessTools.Method(typeof(CullingManager), "Update"),
                 nameof(PrepareObjectCullingCamera));
+            Patch(AccessTools.Method(
+                    typeof(Koenigz.PerfectCulling.EFT
+                        .PerfectCullingCrossSceneGroup),
+                    "Update"),
+                nameof(MaintainCrossSceneMeshGroup), true);
+            Patch(AccessTools.PropertySetter(
+                    typeof(Koenigz.PerfectCulling.EFT
+                        .PerfectCullingCrossSceneContent),
+                    nameof(Koenigz.PerfectCulling.EFT
+                        .PerfectCullingCrossSceneContent
+                        .RuntimeCullingGroup)),
+                nameof(RegisterCrossSceneMeshContent), true);
             Patch(AccessTools.PropertyGetter(
                     typeof(DisablerCullingObjectBase),
                     nameof(DisablerCullingObjectBase.HasEntered)),
@@ -4476,6 +4718,35 @@ namespace CineKit
                 return;
             _instance.ApplyFreeCameraPose();
         }
+
+        private static void MaintainCrossSceneMeshGroup(
+            Koenigz.PerfectCulling.EFT
+                .PerfectCullingCrossSceneGroup __instance)
+        {
+            Plugin plugin = _instance;
+            if (plugin == null || !plugin.IsFreecamActive ||
+                !plugin._crossSceneGroupCullingStates
+                    .ContainsKey(__instance) ||
+                IsCrossSceneGroupVisible(__instance))
+                return;
+            plugin.ForceCrossSceneGroupVisible(__instance);
+        }
+
+        private static void RegisterCrossSceneMeshContent(
+            Koenigz.PerfectCulling.EFT
+                .PerfectCullingCrossSceneContent __instance)
+        {
+            Plugin plugin = _instance;
+            Koenigz.PerfectCulling.EFT
+                .PerfectCullingCrossSceneContentMeshes meshes =
+                __instance as Koenigz.PerfectCulling.EFT
+                    .PerfectCullingCrossSceneContentMeshes;
+            if (plugin != null &&
+                plugin.IsFreecamActive &&
+                meshes != null)
+                plugin.AddCrossSceneMeshContent(meshes);
+        }
+
 
         private void EnsureSkin()
         {
