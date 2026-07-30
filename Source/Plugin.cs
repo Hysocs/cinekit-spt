@@ -121,6 +121,14 @@ namespace CineKit
             AccessTools.Field(typeof(DisablerCullingObjectBase), "_colliders");
         private static readonly FieldInfo CullingInverseCollidersField =
             AccessTools.Field(typeof(DisablerCullingObjectBase), "_inverseColliders");
+        private static readonly FieldInfo AlphaVersionLabelField =
+            AccessTools.Field(
+                typeof(EFT.UI.PreloaderUI), "_alphaVersionLabel");
+        private GameObject _hiddenVersionLabel;
+        private GameObject _hiddenClientWatermark;
+        private bool _versionLabelWasActive;
+        private bool _clientWatermarkWasActive;
+        private bool _freecamWatermarksHidden;
         private static readonly int[] CheckboxCheckPixels =
         {
             5, 10, 6, 9, 7, 8, 7, 9, 8, 9, 8, 10, 9, 10,
@@ -512,6 +520,7 @@ namespace CineKit
             if (!_freecamEnabled.Value || !EnsureFreeCamera())
                 return;
 
+            HideFreecamWatermarks();
             // Keep EFT's non-Unity visibility observers on the same position
             // as its real raid camera. Rendering settings remain game-owned.
             SyncPlayerToFreeCamera();
@@ -564,6 +573,7 @@ namespace CineKit
                 _freecamPlayer.Position.y,
                 0.5f, 2.5f);
             _cameraDetached = true;
+            HideFreecamWatermarks();
             SyncPlayerToFreeCamera();
             ApplyFreecamGraphicsProfile();
             ApplyGrassRenderDistance();
@@ -1157,6 +1167,61 @@ namespace CineKit
             _pathTotalDurationScale = 1f;
             _pathStartDelayRemaining = 0f;
             _pathStopDelayRemaining = 0f;
+        }
+
+        private void HideFreecamWatermarks()
+        {
+            if (_freecamWatermarksHidden)
+            {
+                if (_hiddenVersionLabel != null &&
+                    _hiddenVersionLabel.activeSelf)
+                    _hiddenVersionLabel.SetActive(false);
+                if (_hiddenClientWatermark != null &&
+                    _hiddenClientWatermark.activeSelf)
+                    _hiddenClientWatermark.SetActive(false);
+                return;
+            }
+            EFT.UI.PreloaderUI preloader =
+                EFT.UI.PreloaderUI.Instance;
+            if (preloader == null)
+                return;
+            Component versionLabel =
+                AlphaVersionLabelField != null
+                    ? AlphaVersionLabelField.GetValue(preloader)
+                        as Component
+                    : null;
+            _hiddenVersionLabel =
+                versionLabel != null ? versionLabel.gameObject : null;
+            _hiddenClientWatermark =
+                preloader.ClientWatermark != null
+                    ? preloader.ClientWatermark.gameObject
+                    : null;
+            _versionLabelWasActive =
+                _hiddenVersionLabel != null &&
+                _hiddenVersionLabel.activeSelf;
+            _clientWatermarkWasActive =
+                _hiddenClientWatermark != null &&
+                _hiddenClientWatermark.activeSelf;
+            if (_hiddenVersionLabel != null)
+                _hiddenVersionLabel.SetActive(false);
+            if (_hiddenClientWatermark != null)
+                _hiddenClientWatermark.SetActive(false);
+            _freecamWatermarksHidden = true;
+        }
+
+        private void RestoreFreecamWatermarks()
+        {
+            if (!_freecamWatermarksHidden)
+                return;
+            if (_hiddenVersionLabel != null)
+                _hiddenVersionLabel.SetActive(
+                    _versionLabelWasActive);
+            if (_hiddenClientWatermark != null)
+                _hiddenClientWatermark.SetActive(
+                    _clientWatermarkWasActive);
+            _hiddenVersionLabel = null;
+            _hiddenClientWatermark = null;
+            _freecamWatermarksHidden = false;
         }
 
         private void StartPathRecording()
@@ -2628,6 +2693,7 @@ namespace CineKit
         {
             SyncPlayerToFreeCamera();
             StopPathPlayback();
+            RestoreFreecamWatermarks();
             RestoreGameplayGraphicsProfile();
             RestoreGrassRenderDistance();
             Camera.onPreCull -= OnCameraPreCull;
