@@ -39,7 +39,6 @@
 
   <ItemGroup>
     <Compile Remove="ServerMod\**\*.cs" />
-    <Compile Remove="Client\**\*.cs" />
     <Compile Remove="ExamplePatches\**\*.cs" />
     <Content Include="Schematics\**\*.json" />
     <FfmpegNotice Include="Add ffmpeg.exe into this folder.txt" />
