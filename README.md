@@ -20,7 +20,7 @@ CineKit is a detached cinematic free-camera mod for SPT 4.0.
 
 ## Installation
 
-Extract `dist/CineKit-1.0.0.zip` into the SPT installation directory. It installs:
+Extract `dist/CineKit-1.1.0.zip` into the SPT installation directory. It installs:
 
 ```text
 BepInEx/plugins/Hysocs-CineKit/CineKit.dll
@@ -43,7 +43,7 @@ that ESP hotkey to `END` so opening CineKit does not hide FieldKit ESP.
 
 - Client GUID: `com.hysocs.cinekit`
 - Client plugin name: `Hysocs-CineKit`
-- Version: `1.0.0`
+- Version: `1.1.0`
 
 ## Building
 
@@ -51,7 +51,7 @@ that ESP hotkey to `END` so opening CineKit does not hide FieldKit ESP.
 dotnet build CineKit.sln -c Release -p:SkipDeploy=true
 ```
 
-This creates `dist/CineKit-1.0.0.zip`. Omit `SkipDeploy=true` to also copy the
+This creates `dist/CineKit-1.1.0.zip`. Omit `SkipDeploy=true` to also copy the
 DLLs into the active SPT installation.
 
 ## License

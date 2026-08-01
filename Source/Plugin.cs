@@ -24,7 +24,7 @@ namespace CineKit
     {
         public const string Guid = "com.hysocs.cinekit";
         public const string Name = "Hysocs-CineKit";
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
 
         private ConfigEntry<KeyboardShortcut> _menuKey;
         private ConfigEntry<KeyboardShortcut> _addPointKey;
@@ -48,8 +48,10 @@ namespace CineKit
         private ConfigEntry<bool> _extendedCrossSceneMeshes;
         private ConfigEntry<float> _crossSceneMeshDistance;
         private ConfigEntry<bool> _showCrosshair;
+        private ConfigEntry<bool> _hideRaidHud;
         private ConfigEntry<bool> _playerFollowsFreecam;
         private ConfigEntry<bool> _controlPlayerFromFreecam;
+        private ConfigEntry<bool> _disableAimFovChange;
         private ConfigEntry<FreecamAntialiasingMode> _freecamAntialiasing;
         private ConfigEntry<string> _accentColor;
         private ConfigEntry<float> _windowX;
@@ -70,9 +72,12 @@ namespace CineKit
             30f, 30f, 1000f, 820f);
         private CursorLockMode _savedCursorLock;
         private bool _savedCursorVisible;
+        private Texture2D _menuCursorTexture;
+        private bool _menuCursorApplied;
         private Camera _gameCamera;
         private Camera _sourceCamera;
         private bool _sourceCameraWasEnabled;
+        private float _freecamFieldOfView;
         private bool _cameraDetached;
         private Transform _sourceCameraParent;
         private Vector3 _sourceCameraLocalPosition;
@@ -129,6 +134,11 @@ namespace CineKit
         private readonly Dictionary<GameObject, bool>
             _hiddenBattleStancePanels =
                 new Dictionary<GameObject, bool>();
+        private readonly Dictionary<Canvas, bool>
+            _hiddenBattleUiCanvases =
+                new Dictionary<Canvas, bool>();
+        private bool _battleUiCanvasesScanned;
+        private bool _battleStancePanelsScanned;
         private bool _versionLabelWasActive;
         private bool _clientWatermarkWasActive;
         private bool _freecamWatermarksHidden;
@@ -173,6 +183,8 @@ namespace CineKit
         private int _selectedPathGroup = -1;
         private int _selectedPathPoint = -1;
         private bool _connectionDropdownOpen;
+        private bool _entityDropdownOpen;
+        private bool _pointTypeDropdownOpen;
         private int _pathSegment;
         private bool _pathPlaying;
         private bool _hidePathElementsDuringPlayback;
@@ -208,6 +220,7 @@ namespace CineKit
         private float _pathCurrentSpeed;
         private float _pathStartDelayRemaining;
         private float _pathStopDelayRemaining;
+        private float _pathStayRemaining;
         private float _pathSegmentProgress;
         private float _pathTotalDurationScale = 1f;
         private float _pathDistanceCarry;
@@ -284,16 +297,40 @@ namespace CineKit
             WorldCoordinates
         }
 
+        private enum CameraPathPointType
+        {
+            World,
+            Entity
+        }
+
+        private enum EntityAttachmentPoint
+        {
+            Head,
+            Chest
+        }
+
         private sealed class CameraPathPoint
         {
+            public CameraPathPointType Type;
             public Vector3 Position;
             public Vector3 LookTarget;
             public Vector3 InTangent;
             public Vector3 OutTangent;
+            public string EntityProfileId;
+            public EntityAttachmentPoint EntityAttachment;
+            public Vector3 EntityOffset;
+            public bool FollowEntityLookDirection;
+            public Vector3 EntityAimOffset;
+            public bool SwivelPathToNext = true;
+            public float AttachmentResponse = 8f;
+            public float AttachmentSpeed = 20f;
+            [JsonIgnore] public Vector3 ResolvedPosition;
+            [JsonIgnore] public bool ResolvedPositionInitialized;
             public float Speed = 6f;
             public float SegmentDuration;
             public float StartDelay;
             public float StopDelay;
+            public float StayDuration;
             public float Acceleration = 4f;
             public float Deceleration = 4f;
             public int NextPoint = -1;
@@ -325,14 +362,24 @@ namespace CineKit
         [Serializable]
         private sealed class SavedPathPoint
         {
+            public CameraPathPointType Type;
             public float[] Position;
             public float[] LookTarget;
             public float[] InTangent;
             public float[] OutTangent;
+            public string EntityProfileId;
+            public EntityAttachmentPoint EntityAttachment;
+            public float[] EntityOffset;
+            public bool FollowEntityLookDirection;
+            public float[] EntityAimOffset;
+            public bool SwivelPathToNext = true;
+            public float AttachmentResponse = 8f;
+            public float AttachmentSpeed = 20f;
             public float Speed;
             public float SegmentDuration;
             public float StartDelay;
             public float StopDelay;
+            public float StayDuration;
             public float Acceleration;
             public float Deceleration;
             public int NextPoint = -1;
@@ -405,12 +452,18 @@ namespace CineKit
             _showCrosshair = Config.Bind(
                 "Free Camera", "Show Crosshair", true,
                 "Show the center-dot crosshair while controlling freecam.");
+            _hideRaidHud = Config.Bind(
+                "Free Camera", "Hide Raid HUD", true,
+                "Hide EFT's combat HUD while freecam is active.");
             _playerFollowsFreecam = Config.Bind(
                 "Free Camera", "Player Follows Freecam", false,
                 "Move the hidden local player with freecam.");
             _controlPlayerFromFreecam = Config.Bind(
                 "Free Camera", "Control Player From Freecam", false,
                 "Keep the freecam view fixed while routing controls to the player.");
+            _disableAimFovChange = Config.Bind(
+                "Free Camera", "Disable Aim FOV Change", true,
+                "Keep aiming the controlled player from changing the freecam field of view.");
             _freecamAntialiasing = Config.Bind(
                 "Free Camera", "Antialiasing", FreecamAntialiasingMode.Gameplay,
                 "Temporary basic antialiasing mode used only while freecam is active.");
@@ -442,13 +495,15 @@ namespace CineKit
                 OnControlPlayerFromFreecamChanged;
             _freecamAntialiasing.SettingChanged +=
                 OnFreecamAntialiasingChanged;
+            _hideRaidHud.SettingChanged +=
+                OnHideRaidHudChanged;
             _grassRenderDistance.SettingChanged +=
                 OnGrassRenderDistanceChanged;
             _accentColor.SettingChanged += OnAccentChanged;
             _harmony = new Harmony(Guid);
             InstallPatches();
             _fieldKitConflictResolved = ResolveFieldKitHomeConflict();
-            Logger.LogInfo("CineKit 1.0.0 loaded. Press HOME to open the menu.");
+            Logger.LogInfo("CineKit 1.1.0 loaded. Press HOME to open the menu.");
         }
 
         private void Update()
@@ -457,6 +512,7 @@ namespace CineKit
             UpdateToggleHotkeys();
             CaptureAwaitingMovementKey();
             UpdatePathEditingHotkeys();
+            UpdateEntityPathPoints();
             UpdateGrassDistanceRefresh();
             if (!_fieldKitConflictResolved)
                 _fieldKitConflictResolved = ResolveFieldKitHomeConflict();
@@ -562,6 +618,7 @@ namespace CineKit
             // Do not clone it, detach it, or copy selected settings: those
             // approaches lose parent-driven effects and game-owned state.
             _gameCamera = source;
+            _freecamFieldOfView = source.fieldOfView;
             _freePosition = sourceTransform.position;
             Vector3 angles = sourceTransform.rotation.eulerAngles;
             _yaw = angles.y;
@@ -583,6 +640,7 @@ namespace CineKit
             ScheduleGrassSpatialRefresh();
             ApplyFreeCameraPose();
             Camera.onPreCull += OnCameraPreCull;
+            Camera.onPreRender += OnCameraPreRender;
             Camera.onPostRender += OnCameraPostRender;
             Logger.LogInfo("Free camera enabled.");
             return true;
@@ -596,7 +654,7 @@ namespace CineKit
                 if (_playerFollowsFreecam.Value)
                     HideLocalPlayerBody();
                 else
-                    ShowLocalThirdPersonBody();
+                    RestoreLocalBodyRenderers();
                 UpdateEnvironmentCullingPosition();
                 UpdateIndoorCullingPosition();
             }
@@ -611,34 +669,12 @@ namespace CineKit
             DrawCameraPath(renderingCamera);
         }
 
-        private void ShowLocalThirdPersonBody()
+        private void OnCameraPreRender(Camera renderingCamera)
         {
-            RestoreLocalBodyRenderers();
-
-            Player player = _freecamPlayer;
-            if (player == null || player.PlayerBody == null ||
-                _gameCamera == null)
+            if (renderingCamera != _gameCamera ||
+                !IsFreecamActive)
                 return;
-            _localBodyGroups.Clear();
-            _localBodyRendererIds.Clear();
-            _nativeCameraCullingMask = _gameCamera.cullingMask;
-            _localBodyRenderOverridden = true;
-            player.PlayerBody.GetBodyRenderersNonAlloc(_localBodyGroups);
-            int bodyLayerMask = 0;
-            for (int i = 0; i < _localBodyGroups.Count; i++)
-            {
-                Renderer[] renderers = _localBodyGroups[i].Renderers;
-                if (renderers == null)
-                    continue;
-                for (int j = 0; j < renderers.Length; j++)
-                {
-                    Renderer renderer = renderers[j];
-                    if (!SetLocalRendererState(renderer, true))
-                        continue;
-                    bodyLayerMask |= 1 << renderer.gameObject.layer;
-                }
-            }
-            _gameCamera.cullingMask |= bodyLayerMask;
+            ApplyFreeCameraPose();
         }
 
         private void HideLocalPlayerBody()
@@ -748,6 +784,13 @@ namespace CineKit
                 _freecamPlayer == null ||
                 !_playerFollowsFreecam.Value)
                 return;
+            TeleportPlayerToFreeCamera();
+        }
+
+        private void TeleportPlayerToFreeCamera()
+        {
+            if (!_cameraDetached || _freecamPlayer == null)
+                return;
             Vector3 playerPosition =
                 CurrentCameraPosition -
                 Vector3.up * _freecamPlayerEyeHeight;
@@ -768,11 +811,12 @@ namespace CineKit
             if (!_cameraDetached || _gameCamera == null)
                 return;
 
+            Vector3 targetPosition = _freePosition;
             Quaternion targetRotation =
                 Quaternion.Euler(_pitch, _yaw, 0f);
             if (!_renderPoseInitialized || !_motionSmoothing.Value)
             {
-                _renderPosition = _freePosition;
+                _renderPosition = targetPosition;
                 _renderRotation = targetRotation;
                 _renderPoseInitialized = true;
             }
@@ -787,13 +831,16 @@ namespace CineKit
                 float rotationBlend = 1f - Mathf.Exp(
                     -_rotationSmoothing.Value * delta);
                 _renderPosition = Vector3.Lerp(
-                    _renderPosition, _freePosition, positionBlend);
+                    _renderPosition, targetPosition, positionBlend);
                 _renderRotation = Quaternion.Slerp(
                     _renderRotation, targetRotation, rotationBlend);
                 _renderPoseFrame = Time.frameCount;
             }
             _gameCamera.transform.SetPositionAndRotation(
                 _renderPosition, _renderRotation);
+            if (_controlPlayerFromFreecam.Value &&
+                _disableAimFovChange.Value)
+                _gameCamera.fieldOfView = _freecamFieldOfView;
         }
 
         private void AddPathPoint()
@@ -813,7 +860,8 @@ namespace CineKit
                 CameraPathPoint previous =
                     _pathPoints[_pathPoints.Count - 2];
                 Vector3 third =
-                    (point.Position - previous.Position) / 3f;
+                    (point.Position -
+                     GetPointPosition(previous)) / 3f;
                 previous.OutTangent = third;
                 point.InTangent = -third;
                 if (previous.NextPoint < 0)
@@ -832,6 +880,170 @@ namespace CineKit
             _selectedPathGroup = _pathGroups.Count - 1;
             _selectedPathPoint = -1;
             StopPathPlayback();
+        }
+
+        private void UpdateEntityPathPoints()
+        {
+            float delta = Mathf.Min(
+                Time.unscaledDeltaTime, 1f / 15f);
+            for (int i = 0; i < _pathPoints.Count; i++)
+            {
+                CameraPathPoint point = _pathPoints[i];
+                if (point.Type != CameraPathPointType.Entity)
+                    continue;
+                Player target = FindPathPointEntity(point);
+                if (target == null)
+                    continue;
+                Quaternion targetRotation =
+                    point.FollowEntityLookDirection
+                        ? GetEntityLookRotation(target)
+                        : GetEntityBodyRotation(target);
+                Vector3 desired =
+                    GetEntityAttachmentPosition(
+                        target, point.EntityAttachment) +
+                    targetRotation * point.EntityOffset;
+                if (!point.ResolvedPositionInitialized)
+                {
+                    point.ResolvedPosition = desired;
+                    point.ResolvedPositionInitialized = true;
+                    continue;
+                }
+                Vector3 softened = point.AttachmentResponse <= 0f
+                    ? desired
+                    : Vector3.Lerp(
+                        point.ResolvedPosition,
+                        desired,
+                        1f - Mathf.Exp(
+                            -point.AttachmentResponse * delta));
+                Vector3 previousPosition =
+                    point.ResolvedPosition;
+                Vector3 nextPosition =
+                    point.AttachmentSpeed <= 0f
+                        ? softened
+                        : Vector3.MoveTowards(
+                            point.ResolvedPosition,
+                            softened,
+                            point.AttachmentSpeed * delta);
+                RotateConnectedTangentsForMovedPoint(
+                    point, previousPosition, nextPosition);
+                point.ResolvedPosition = nextPosition;
+                UpdateEntityOutgoingConnection(point);
+            }
+            // A moving entity can also be the destination of another
+            // attached segment, so resolve every swivel after all anchors
+            // have reached their final position for this frame.
+            for (int i = 0; i < _pathPoints.Count; i++)
+                UpdateEntityOutgoingConnection(_pathPoints[i]);
+        }
+
+        private Player FindPathPointEntity(CameraPathPoint point)
+        {
+            GameWorld world = Singleton<GameWorld>.Instance;
+            if (world == null)
+                return null;
+            if (string.IsNullOrEmpty(point.EntityProfileId))
+                return world.MainPlayer;
+            foreach (IPlayer candidate in world.RegisteredPlayers)
+            {
+                Player player = candidate as Player;
+                if (player != null &&
+                    player.ProfileId == point.EntityProfileId)
+                    return player;
+            }
+            return null;
+        }
+
+        private static Quaternion GetEntityBodyRotation(Player player) =>
+            Quaternion.Euler(
+                0f, player.Transform.eulerAngles.y, 0f);
+
+        private static Quaternion GetEntityLookRotation(Player player)
+        {
+            Vector3 direction = player.LookDirection;
+            return direction.sqrMagnitude > 0.0001f
+                ? Quaternion.LookRotation(
+                    direction.normalized, Vector3.up)
+                : GetEntityBodyRotation(player);
+        }
+
+        private static Vector3 GetEntityAttachmentPosition(
+            Player player, EntityAttachmentPoint attachment)
+        {
+            if (player.PlayerBones != null)
+            {
+                if (attachment == EntityAttachmentPoint.Head &&
+                    player.PlayerBones.Head != null)
+                    return player.PlayerBones.Head.position;
+                if (attachment == EntityAttachmentPoint.Chest &&
+                    player.PlayerBones.Ribcage != null)
+                    return player.PlayerBones.Ribcage.position;
+            }
+            return player.Position + Vector3.up *
+                (attachment == EntityAttachmentPoint.Head
+                    ? 1.6f
+                    : 1.15f);
+        }
+
+        private Vector3 GetPointPosition(CameraPathPoint point) =>
+            point.Type == CameraPathPointType.Entity &&
+            point.ResolvedPositionInitialized
+                ? point.ResolvedPosition
+                : point.Position;
+
+        private Vector3 GetPointLookTarget(CameraPathPoint point)
+        {
+            Vector3 pointPosition = GetPointPosition(point);
+            if (point.Type != CameraPathPointType.Entity ||
+                !point.FollowEntityLookDirection)
+                return pointPosition +
+                    (point.LookTarget - point.Position);
+            Player target = FindPathPointEntity(point);
+            return target == null
+                ? pointPosition +
+                  (point.LookTarget - point.Position)
+                : pointPosition +
+                  GetEntityLookRotation(target) *
+                  point.EntityAimOffset;
+        }
+
+        private void UpdateEntityOutgoingConnection(
+            CameraPathPoint point)
+        {
+            if (point.Type != CameraPathPointType.Entity ||
+                !point.SwivelPathToNext)
+                return;
+            int pointIndex = _pathPoints.IndexOf(point);
+            int targetIndex = point.NextPoint;
+            if (pointIndex < 0 ||
+                targetIndex < 0 ||
+                targetIndex >= _pathPoints.Count ||
+                targetIndex == pointIndex)
+                return;
+            CameraPathPoint target = _pathPoints[targetIndex];
+            Vector3 direction =
+                GetPointPosition(target) -
+                GetPointPosition(point);
+            float distance = direction.magnitude;
+            if (distance <= 0.0001f)
+            {
+                point.OutTangent = Vector3.zero;
+                target.InTangent = Vector3.zero;
+                return;
+            }
+            direction /= distance;
+            float maximumLength = distance / 3f;
+            float outgoingLength = point.OutTangent.magnitude;
+            float incomingLength = target.InTangent.magnitude;
+            if (outgoingLength <= 0.0001f)
+                outgoingLength = maximumLength;
+            if (incomingLength <= 0.0001f)
+                incomingLength = maximumLength;
+            point.OutTangent =
+                direction *
+                Mathf.Min(outgoingLength, maximumLength);
+            target.InTangent =
+                -direction *
+                Mathf.Min(incomingLength, maximumLength);
         }
 
         private void DeleteSelectedPathGroup()
@@ -1010,6 +1222,7 @@ namespace CineKit
             {
                 template.Points.Add(new SavedPathPoint
                 {
+                    Type = point.Type,
                     Position = ToArray(
                         inverse * (point.Position - origin)),
                     LookTarget = ToArray(
@@ -1018,10 +1231,22 @@ namespace CineKit
                         inverse * point.InTangent),
                     OutTangent = ToArray(
                         inverse * point.OutTangent),
+                    EntityProfileId = point.EntityProfileId,
+                    EntityAttachment = point.EntityAttachment,
+                    EntityOffset = ToArray(point.EntityOffset),
+                    FollowEntityLookDirection =
+                        point.FollowEntityLookDirection,
+                    EntityAimOffset =
+                        ToArray(point.EntityAimOffset),
+                    SwivelPathToNext =
+                        point.SwivelPathToNext,
+                    AttachmentResponse = point.AttachmentResponse,
+                    AttachmentSpeed = point.AttachmentSpeed,
                     Speed = point.Speed,
                     SegmentDuration = point.SegmentDuration,
                     StartDelay = point.StartDelay,
                     StopDelay = point.StopDelay,
+                    StayDuration = point.StayDuration,
                     Acceleration = point.Acceleration,
                     Deceleration = point.Deceleration,
                     NextPoint = point.NextPoint,
@@ -1080,6 +1305,7 @@ namespace CineKit
                     continue;
                 group.Points.Add(new CameraPathPoint
                 {
+                    Type = saved.Type,
                     Position = origin +
                         anchorRotation * FromArray(saved.Position),
                     LookTarget = origin +
@@ -1088,11 +1314,30 @@ namespace CineKit
                         anchorRotation * FromArray(saved.InTangent),
                     OutTangent =
                         anchorRotation * FromArray(saved.OutTangent),
+                    EntityProfileId = saved.EntityProfileId,
+                    EntityAttachment = saved.EntityAttachment,
+                    EntityOffset = IsVector(saved.EntityOffset)
+                        ? FromArray(saved.EntityOffset)
+                        : Vector3.zero,
+                    FollowEntityLookDirection =
+                        saved.FollowEntityLookDirection,
+                    EntityAimOffset =
+                        IsVector(saved.EntityAimOffset)
+                            ? FromArray(saved.EntityAimOffset)
+                            : Vector3.forward * 10f,
+                    SwivelPathToNext =
+                        saved.SwivelPathToNext,
+                    AttachmentResponse =
+                        Mathf.Max(0f, saved.AttachmentResponse),
+                    AttachmentSpeed =
+                        Mathf.Max(0f, saved.AttachmentSpeed),
                     Speed = Mathf.Max(0.1f, saved.Speed),
                     SegmentDuration =
                         Mathf.Max(0f, saved.SegmentDuration),
                     StartDelay = Mathf.Max(0f, saved.StartDelay),
                     StopDelay = Mathf.Max(0f, saved.StopDelay),
+                    StayDuration =
+                        Mathf.Max(0f, saved.StayDuration),
                     Acceleration =
                         Mathf.Max(0.1f, saved.Acceleration),
                     Deceleration =
@@ -1157,6 +1402,8 @@ namespace CineKit
             _pathStartDelayRemaining =
                 _pathPoints[0].StartDelay;
             _pathStopDelayRemaining = 0f;
+            _pathStayRemaining =
+                _pathPoints[0].StayDuration;
             SetFreePose(_pathPoints[0]);
         }
 
@@ -1170,22 +1417,26 @@ namespace CineKit
             _pathTotalDurationScale = 1f;
             _pathStartDelayRemaining = 0f;
             _pathStopDelayRemaining = 0f;
+            _pathStayRemaining = 0f;
         }
 
         private void HideFreecamWatermarks()
         {
             if (_freecamWatermarksHidden)
             {
+                if (_hideRaidHud.Value)
+                {
+                    HideBattleUiCanvases();
+                    HideBattleStancePanels();
+                }
+                else
+                    RestoreBattleHud();
                 if (_hiddenVersionLabel != null &&
                     _hiddenVersionLabel.activeSelf)
                     _hiddenVersionLabel.SetActive(false);
                 if (_hiddenClientWatermark != null &&
                     _hiddenClientWatermark.activeSelf)
                     _hiddenClientWatermark.SetActive(false);
-                foreach (GameObject panel
-                             in _hiddenBattleStancePanels.Keys)
-                    if (panel != null && panel.activeSelf)
-                        panel.SetActive(false);
                 return;
             }
             EFT.UI.PreloaderUI preloader =
@@ -1213,6 +1464,23 @@ namespace CineKit
                 _hiddenVersionLabel.SetActive(false);
             if (_hiddenClientWatermark != null)
                 _hiddenClientWatermark.SetActive(false);
+            if (_hideRaidHud.Value)
+            {
+                HideBattleUiCanvases(true);
+                HideBattleStancePanels(true);
+            }
+            _freecamWatermarksHidden = true;
+        }
+
+        private void HideBattleStancePanels(bool forceScan = false)
+        {
+            foreach (GameObject hidden
+                         in _hiddenBattleStancePanels.Keys)
+                if (hidden != null && hidden.activeSelf)
+                    hidden.SetActive(false);
+            if (!forceScan && _battleStancePanelsScanned)
+                return;
+            _battleStancePanelsScanned = true;
             EFT.UI.BattleStancePanel[] stancePanels =
                 Resources.FindObjectsOfTypeAll<
                     EFT.UI.BattleStancePanel>();
@@ -1227,7 +1495,54 @@ namespace CineKit
                     panelObject.activeSelf;
                 panelObject.SetActive(false);
             }
-            _freecamWatermarksHidden = true;
+        }
+
+        private void HideBattleUiCanvases(bool forceScan = false)
+        {
+            foreach (Canvas canvas in
+                     _hiddenBattleUiCanvases.Keys)
+                if (canvas != null && canvas.enabled)
+                    canvas.enabled = false;
+
+            if (!forceScan && _battleUiCanvasesScanned)
+                return;
+            _battleUiCanvasesScanned = true;
+            Canvas[] allCanvases =
+                Resources.FindObjectsOfTypeAll<Canvas>();
+            for (int i = 0; i < allCanvases.Length; i++)
+            {
+                Canvas canvas = allCanvases[i];
+                if (canvas == null ||
+                    !canvas.gameObject.scene.IsValid() ||
+                    _hiddenBattleUiCanvases.ContainsKey(canvas))
+                    continue;
+                MonoBehaviour[] parents =
+                    canvas.GetComponentsInParent<
+                        MonoBehaviour>(true);
+                bool belongsToBattleScreen = false;
+                for (int j = 0; j < parents.Length; j++)
+                {
+                    Type type = parents[j].GetType();
+                    while (type != null)
+                    {
+                        if (type.Name.StartsWith(
+                                "BattleUIScreen",
+                                StringComparison.Ordinal))
+                        {
+                            belongsToBattleScreen = true;
+                            break;
+                        }
+                        type = type.BaseType;
+                    }
+                    if (belongsToBattleScreen)
+                        break;
+                }
+                if (!belongsToBattleScreen)
+                    continue;
+                _hiddenBattleUiCanvases[canvas] =
+                    canvas.enabled;
+                canvas.enabled = false;
+            }
         }
 
         private void RestoreFreecamWatermarks()
@@ -1240,14 +1555,26 @@ namespace CineKit
             if (_hiddenClientWatermark != null)
                 _hiddenClientWatermark.SetActive(
                     _clientWatermarkWasActive);
+            RestoreBattleHud();
+            _hiddenVersionLabel = null;
+            _hiddenClientWatermark = null;
+            _freecamWatermarksHidden = false;
+        }
+
+        private void RestoreBattleHud()
+        {
             foreach (KeyValuePair<GameObject, bool> entry
                          in _hiddenBattleStancePanels)
                 if (entry.Key != null)
                     entry.Key.SetActive(entry.Value);
+            foreach (KeyValuePair<Canvas, bool> entry
+                         in _hiddenBattleUiCanvases)
+                if (entry.Key != null)
+                    entry.Key.enabled = entry.Value;
             _hiddenBattleStancePanels.Clear();
-            _hiddenVersionLabel = null;
-            _hiddenClientWatermark = null;
-            _freecamWatermarksHidden = false;
+            _hiddenBattleUiCanvases.Clear();
+            _battleUiCanvasesScanned = false;
+            _battleStancePanelsScanned = false;
         }
 
         private void StartPathRecording()
@@ -1631,11 +1958,21 @@ namespace CineKit
             if (_pathStopDelayRemaining > 0f)
             {
                 _pathStopDelayRemaining -= delta;
+                if (from.Type == CameraPathPointType.Entity)
+                    SetFreePose(from);
                 return;
             }
             if (_pathStartDelayRemaining > 0f)
             {
                 _pathStartDelayRemaining -= delta;
+                if (from.Type == CameraPathPointType.Entity)
+                    SetFreePose(from);
+                return;
+            }
+            if (_pathStayRemaining > 0f)
+            {
+                _pathStayRemaining -= delta;
+                SetFreePose(from);
                 return;
             }
             int nextIndex = from.NextPoint;
@@ -1663,7 +2000,8 @@ namespace CineKit
                 finalSegment ||
                 to.StopHere ||
                 to.StartDelay > 0f ||
-                to.StopDelay > 0f;
+                to.StopDelay > 0f ||
+                to.StayDuration > 0f;
             float timedDuration = GetTimedSegmentDuration(
                 from, to, segmentLength);
             if (timedDuration > 0f)
@@ -1737,6 +2075,7 @@ namespace CineKit
             else
                 _pathTimeCarry = 0f;
             _pathStopDelayRemaining = to.StopDelay;
+            _pathStayRemaining = to.StayDuration;
             _pathStartDelayRemaining =
                 finalSegment
                     ? 0f
@@ -1746,30 +2085,31 @@ namespace CineKit
 
         private void SetFreePose(CameraPathPoint point)
         {
-            _freePosition = point.Position;
+            _freePosition = GetPointPosition(point);
             ApplyRotation(GetPointRotation(point));
             ApplyFreeCameraPose();
         }
 
-        private static Quaternion GetPointRotation(
+        private Quaternion GetPointRotation(
             CameraPathPoint point)
         {
             Vector3 direction =
-                point.LookTarget - point.Position;
+                GetPointLookTarget(point) -
+                GetPointPosition(point);
             return direction.sqrMagnitude <= 0.000001f
                 ? Quaternion.identity
                 : Quaternion.LookRotation(direction, Vector3.up);
         }
 
-        private static Vector3 EvaluateBezier(
+        private Vector3 EvaluateBezier(
             CameraPathPoint from,
             CameraPathPoint to,
             float t)
         {
-            Vector3 p0 = from.Position;
-            Vector3 p1 = from.Position + from.OutTangent;
-            Vector3 p2 = to.Position + to.InTangent;
-            Vector3 p3 = to.Position;
+            Vector3 p0 = GetPointPosition(from);
+            Vector3 p1 = p0 + from.OutTangent;
+            Vector3 p3 = GetPointPosition(to);
+            Vector3 p2 = p3 + to.InTangent;
             return EvaluateCubic(p0, p1, p2, p3, t);
         }
 
@@ -1794,31 +2134,36 @@ namespace CineKit
                 !_pathGroups[_selectedPathGroup].SmoothTransitions)
                 return EvaluateBezier(from, to, t);
 
-            Vector3 previous = from.Position;
+            Vector3 fromPosition = GetPointPosition(from);
+            Vector3 toPosition = GetPointPosition(to);
+            Vector3 previous = fromPosition;
             for (int i = 0; i < _pathPoints.Count; i++)
                 if (_pathPoints[i].NextPoint == fromIndex)
                 {
-                    previous = _pathPoints[i].Position;
+                    previous = GetPointPosition(_pathPoints[i]);
                     break;
                 }
-            if (previous == from.Position && fromIndex > 0)
-                previous = _pathPoints[fromIndex - 1].Position;
+            if (previous == fromPosition && fromIndex > 0)
+                previous = GetPointPosition(
+                    _pathPoints[fromIndex - 1]);
 
-            Vector3 following = to.Position;
+            Vector3 following = toPosition;
             int afterIndex = to.NextPoint;
             if (afterIndex >= 0 &&
                 afterIndex < _pathPoints.Count &&
                 afterIndex != toIndex)
-                following = _pathPoints[afterIndex].Position;
+                following = GetPointPosition(
+                    _pathPoints[afterIndex]);
             else if (toIndex + 1 < _pathPoints.Count)
-                following = _pathPoints[toIndex + 1].Position;
+                following = GetPointPosition(
+                    _pathPoints[toIndex + 1]);
 
-            Vector3 p0 = from.Position;
+            Vector3 p0 = fromPosition;
             Vector3 p1 =
-                p0 + (to.Position - previous) / 6f;
-            Vector3 p3 = to.Position;
+                p0 + (toPosition - previous) / 6f;
+            Vector3 p3 = toPosition;
             Vector3 p2 =
-                p3 + (from.Position - following) / 6f;
+                p3 + (fromPosition - following) / 6f;
             return EvaluateCubic(p0, p1, p2, p3, t);
         }
 
@@ -1828,7 +2173,7 @@ namespace CineKit
             const int samples = 16;
             float length = 0f;
             Vector3 previous =
-                _pathPoints[fromIndex].Position;
+                GetPointPosition(_pathPoints[fromIndex]);
             for (int i = 1; i <= samples; i++)
             {
                 Vector3 current = EvaluatePlaybackSegment(
@@ -1841,13 +2186,13 @@ namespace CineKit
             return Mathf.Max(0.001f, length);
         }
 
-        private static float EstimateBezierLength(
+        private float EstimateBezierLength(
             CameraPathPoint from,
             CameraPathPoint to)
         {
             const int samples = 16;
             float length = 0f;
-            Vector3 previous = from.Position;
+            Vector3 previous = GetPointPosition(from);
             for (int i = 1; i <= samples; i++)
             {
                 Vector3 current = EvaluateBezier(
@@ -1942,8 +2287,124 @@ namespace CineKit
             if (_selectedPathPoint < 0 ||
                 _selectedPathPoint >= _pathPoints.Count)
                 return;
-            _pathPoints[_selectedPathPoint].LookTarget =
-                _freePosition;
+            CameraPathPoint point =
+                _pathPoints[_selectedPathPoint];
+            SetPointLookTargetWorld(point, _freePosition);
+        }
+
+        private void SetPointLookTargetWorld(
+            CameraPathPoint point, Vector3 worldTarget)
+        {
+            Vector3 pointPosition = GetPointPosition(point);
+            if (point.Type == CameraPathPointType.Entity &&
+                point.FollowEntityLookDirection)
+            {
+                Player target = FindPathPointEntity(point);
+                if (target != null)
+                {
+                    point.EntityAimOffset =
+                        Quaternion.Inverse(
+                            GetEntityLookRotation(target)) *
+                        (worldTarget - pointPosition);
+                    return;
+                }
+            }
+            point.LookTarget = point.Position +
+                (worldTarget - pointPosition);
+        }
+
+        private void SetPointWorldPosition(
+            CameraPathPoint point, Vector3 worldPosition)
+        {
+            Vector3 current = GetPointPosition(point);
+            RotateConnectedTangentsForMovedPoint(
+                point, current, worldPosition);
+            if (point.Type == CameraPathPointType.Entity)
+            {
+                Player target = FindPathPointEntity(point);
+                if (target == null)
+                    return;
+                Quaternion rotation =
+                    point.FollowEntityLookDirection
+                        ? GetEntityLookRotation(target)
+                        : GetEntityBodyRotation(target);
+                point.EntityOffset =
+                    Quaternion.Inverse(rotation) *
+                    (worldPosition -
+                     GetEntityAttachmentPosition(
+                         target, point.EntityAttachment));
+                point.ResolvedPosition = worldPosition;
+                point.ResolvedPositionInitialized = true;
+                UpdateEntityOutgoingConnection(point);
+                return;
+            }
+            Vector3 delta = worldPosition - current;
+            point.Position = worldPosition;
+            point.LookTarget += delta;
+            for (int i = 0; i < _pathPoints.Count; i++)
+            {
+                CameraPathPoint source = _pathPoints[i];
+                if (source.NextPoint ==
+                    _pathPoints.IndexOf(point))
+                    UpdateEntityOutgoingConnection(source);
+            }
+        }
+
+        private void RotateConnectedTangentsForMovedPoint(
+            CameraPathPoint moved,
+            Vector3 oldPosition,
+            Vector3 newPosition)
+        {
+            if ((newPosition - oldPosition).sqrMagnitude <=
+                0.0000001f)
+                return;
+            int movedIndex = _pathPoints.IndexOf(moved);
+            if (movedIndex < 0)
+                return;
+
+            int outgoingIndex = moved.NextPoint;
+            if (outgoingIndex >= 0 &&
+                outgoingIndex < _pathPoints.Count &&
+                outgoingIndex != movedIndex)
+            {
+                CameraPathPoint target =
+                    _pathPoints[outgoingIndex];
+                RotateSegmentTangents(
+                    moved,
+                    target,
+                    GetPointPosition(target) - oldPosition,
+                    GetPointPosition(target) - newPosition);
+            }
+
+            for (int i = 0; i < _pathPoints.Count; i++)
+            {
+                CameraPathPoint source = _pathPoints[i];
+                if (i == movedIndex ||
+                    source.NextPoint != movedIndex)
+                    continue;
+                Vector3 sourcePosition =
+                    GetPointPosition(source);
+                RotateSegmentTangents(
+                    source,
+                    moved,
+                    oldPosition - sourcePosition,
+                    newPosition - sourcePosition);
+            }
+        }
+
+        private static void RotateSegmentTangents(
+            CameraPathPoint from,
+            CameraPathPoint to,
+            Vector3 oldDirection,
+            Vector3 newDirection)
+        {
+            if (oldDirection.sqrMagnitude <= 0.000001f ||
+                newDirection.sqrMagnitude <= 0.000001f)
+                return;
+            Quaternion rotation = Quaternion.FromToRotation(
+                oldDirection, newDirection);
+            from.OutTangent = rotation * from.OutTangent;
+            to.InTangent = rotation * to.InTangent;
         }
 
         private void EnsurePathMaterial()
@@ -2001,7 +2462,8 @@ namespace CineKit
                     if (target == i)
                         continue;
                 }
-                Vector3 previous = _pathPoints[i].Position;
+                Vector3 previous =
+                    GetPointPosition(_pathPoints[i]);
                 for (int sample = 1; sample <= 24; sample++)
                 {
                     Vector3 current = EvaluatePlaybackSegment(
@@ -2015,6 +2477,46 @@ namespace CineKit
             for (int i = 0; i < _pathPoints.Count; i++)
             {
                 CameraPathPoint point = _pathPoints[i];
+                Vector3 pointPosition = GetPointPosition(point);
+                Vector3 pointLookTarget = GetPointLookTarget(point);
+                if (point.Type == CameraPathPointType.Entity)
+                {
+                    Player entity = FindPathPointEntity(point);
+                    if (entity != null)
+                    {
+                        Vector3 anchor =
+                            GetEntityAttachmentPosition(
+                                entity, point.EntityAttachment);
+                        GL.Color(new Color(
+                            1f, 0.55f, 0.15f, 0.9f));
+                        const int dashCount = 16;
+                        for (int dash = 0;
+                             dash < dashCount;
+                             dash += 2)
+                        {
+                            GL.Vertex(Vector3.Lerp(
+                                anchor,
+                                pointPosition,
+                                dash / (float)dashCount));
+                            GL.Vertex(Vector3.Lerp(
+                                anchor,
+                                pointPosition,
+                                (dash + 1f) / dashCount));
+                        }
+                        Vector3 markerRight =
+                            camera.transform.right * 0.18f;
+                        Vector3 markerUp =
+                            camera.transform.up * 0.18f;
+                        GL.Vertex(
+                            anchor - markerRight - markerUp);
+                        GL.Vertex(
+                            anchor + markerRight + markerUp);
+                        GL.Vertex(
+                            anchor - markerRight + markerUp);
+                        GL.Vertex(
+                            anchor + markerRight - markerUp);
+                    }
+                }
                 bool positionHovered =
                     i == _worldHoverPoint &&
                     _worldHoverHandle == 0;
@@ -2029,16 +2531,16 @@ namespace CineKit
                     float a = j * Mathf.PI * 2f / segments;
                     float b = (j + 1) * Mathf.PI * 2f /
                         segments;
-                    GL.Vertex(point.Position + new Vector3(
+                    GL.Vertex(pointPosition + new Vector3(
                         Mathf.Cos(a) * radius, 0f,
                         Mathf.Sin(a) * radius));
-                    GL.Vertex(point.Position + new Vector3(
+                    GL.Vertex(pointPosition + new Vector3(
                         Mathf.Cos(b) * radius, 0f,
                         Mathf.Sin(b) * radius));
                 }
                 Vector3 positionHandle =
                     GetWorldHandlePosition(i, 0);
-                GL.Vertex(point.Position);
+                GL.Vertex(pointPosition);
                 GL.Vertex(positionHandle);
                 DrawWireBall(positionHandle, 0.16f, segments);
                 Quaternion pointRotation =
@@ -2048,12 +2550,12 @@ namespace CineKit
                 Vector3 right =
                     pointRotation * Vector3.right;
                 Vector3 nose =
-                    point.Position + forward * 0.45f;
+                    pointPosition + forward * 0.45f;
                 Vector3 rearLeft =
-                    point.Position - forward * 0.25f -
+                    pointPosition - forward * 0.25f -
                     right * 0.28f;
                 Vector3 rearRight =
-                    point.Position - forward * 0.25f +
+                    pointPosition - forward * 0.25f +
                     right * 0.28f;
                 GL.Vertex(nose);
                 GL.Vertex(rearLeft);
@@ -2061,15 +2563,15 @@ namespace CineKit
                 GL.Vertex(rearRight);
                 GL.Vertex(rearRight);
                 GL.Vertex(nose);
-                GL.Vertex(point.Position);
-                GL.Vertex(point.LookTarget);
+                GL.Vertex(pointPosition);
+                GL.Vertex(pointLookTarget);
 
                 GL.Color(
                     i == _worldHoverPoint &&
                     _worldHoverHandle == 3
                         ? Color.white
                         : new Color(1f, 0.3f, 0.75f, 1f));
-                DrawWireBall(point.LookTarget, 0.18f, segments);
+                DrawWireBall(pointLookTarget, 0.18f, segments);
             }
 
             for (int i = 0; i < _pathPoints.Count; i++)
@@ -2510,6 +3012,22 @@ namespace CineKit
                 ApplyFreecamGraphicsProfile();
         }
 
+        private void OnHideRaidHudChanged(
+            object sender, EventArgs args)
+        {
+            if (!IsFreecamActive)
+                return;
+            if (_hideRaidHud.Value)
+            {
+                HideBattleUiCanvases(true);
+                HideBattleStancePanels();
+            }
+            else
+            {
+                RestoreBattleHud();
+            }
+        }
+
         private void OnGrassRenderDistanceChanged(
             object sender, EventArgs args)
         {
@@ -2723,6 +3241,7 @@ namespace CineKit
             RestoreGameplayGraphicsProfile();
             RestoreGrassRenderDistance();
             Camera.onPreCull -= OnCameraPreCull;
+            Camera.onPreRender -= OnCameraPreRender;
             Camera.onPostRender -= OnCameraPostRender;
             RestoreLocalBodyRenderers();
             if (_cameraDetached)
@@ -3119,6 +3638,11 @@ namespace CineKit
 
         private void DrawCameraPanel()
         {
+            DrawFreecamPanel();
+        }
+
+        private void DrawFreecamPanel()
+        {
             GUILayout.Label(
                 _freecamEnabled.Value
                     ? "STATUS: FREE CAMERA ACTIVE"
@@ -3148,8 +3672,38 @@ namespace CineKit
             GUILayout.Space(8f);
             DrawToggleWithHotkey(_showCrosshair, "Show Crosshair");
             GUILayout.Space(4f);
-            DrawToggleWithHotkey(
-                _playerFollowsFreecam, "Player Follows Freecam");
+            DrawToggleWithHotkey(_hideRaidHud, "Hide Raid HUD");
+            GUILayout.Space(4f);
+            GUILayout.BeginHorizontal();
+            _playerFollowsFreecam.Value = GUILayout.Toggle(
+                _playerFollowsFreecam.Value,
+                new GUIContent(
+                    "NoClip mode",
+                    _playerFollowsFreecam.Description.Description));
+            GUILayout.FlexibleSpace();
+            bool wasEnabled = GUI.enabled;
+            GUI.enabled = wasEnabled && IsFreecamActive;
+            if (GUILayout.Button(
+                    "Teleport Player to Cam",
+                    GUILayout.Width(165f)))
+                TeleportPlayerToFreeCamera();
+            GUI.enabled = wasEnabled;
+            string noClipHotkey = ReferenceEquals(
+                    _toggleAwaitingHotkey, _playerFollowsFreecam)
+                ? "[Press key]"
+                : FormatToggleHotkey(
+                    _toggleHotkeys[_playerFollowsFreecam].Value);
+            if (GUILayout.Button(
+                    noClipHotkey,
+                    GUI.skin.label,
+                    GUILayout.Width(100f)))
+            {
+                FinishMovementKeyCapture();
+                _standaloneAwaitingHotkey = null;
+                _toggleAwaitingHotkey = _playerFollowsFreecam;
+                _toggleHotkeyCaptureStartedFrame = Time.frameCount;
+            }
+            GUILayout.EndHorizontal();
             if (_playerFollowsFreecam.Value)
                 GUILayout.Label(
                     "Moves the hidden player with the camera. " +
@@ -3160,9 +3714,20 @@ namespace CineKit
                 _controlPlayerFromFreecam,
                 "Control Player From Freecam");
             if (_controlPlayerFromFreecam.Value)
+            {
                 GUILayout.Label(
                     "Freezes the freecam view and sends movement, mouse, " +
-                    "weapon, and interaction controls to the player.");
+                    "weapon, and interaction controls to the player. " +
+                    "The freecam view remains fixed.");
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(20f);
+                _disableAimFovChange.Value = GUILayout.Toggle(
+                    _disableAimFovChange.Value,
+                    new GUIContent(
+                        "Disable aim FOV change",
+                        _disableAimFovChange.Description.Description));
+                GUILayout.EndHorizontal();
+            }
             GUILayout.Space(4f);
             GUILayout.Label(
                 "LOD Distance: " +
@@ -3357,13 +3922,20 @@ namespace CineKit
             GUI.enabled = _selectedPathPoint >= 0 &&
                           _selectedPathPoint <
                           _pathPoints.Count;
+            bool canMoveSelectedPoint =
+                GUI.enabled;
+            GUI.enabled = canMoveSelectedPoint;
             if (GUILayout.Button(
                     "Move Point to Current location"))
             {
                 CameraPathPoint point =
                     _pathPoints[_selectedPathPoint];
-                point.Position = _freePosition;
+                SetPointWorldPosition(
+                    point, _freePosition);
             }
+            GUI.enabled = _selectedPathPoint >= 0 &&
+                          _selectedPathPoint <
+                          _pathPoints.Count;
             if (GUILayout.Button(
                     "Set Point looking direction to location"))
                 SetSelectedLookTarget();
@@ -3414,6 +3986,12 @@ namespace CineKit
             GUILayout.Label(
                 "POINT " + (_selectedPathPoint + 1) +
                 " — START / STOP", _headingStyle);
+            DrawPointSlider(
+                "Stay at Point", ref point.StayDuration,
+                0f, 120f, " s");
+            GUILayout.Label(
+                "Holds the camera here before continuing. Entity Points " +
+                "keep following their target while held.");
             DrawPointSlider(
                 "Start Delay", ref point.StartDelay,
                 0f, 10f, " s");
@@ -3722,6 +4300,36 @@ namespace CineKit
             GUILayout.Label(
                 "POINT " + (_selectedPathPoint + 1) +
                 " SETTINGS", _headingStyle);
+            string pointTypeLabel =
+                point.Type == CameraPathPointType.Entity
+                    ? "Entity Point"
+                    : "3D Point";
+            if (GUILayout.Button(
+                    "Point Type: " + pointTypeLabel))
+                _pointTypeDropdownOpen =
+                    !_pointTypeDropdownOpen;
+            if (_pointTypeDropdownOpen)
+            {
+                GUILayout.BeginVertical(GUI.skin.box);
+                if (GUILayout.Button("3D Point"))
+                {
+                    if (point.Type != CameraPathPointType.World)
+                        SetPathPointType(
+                            point, CameraPathPointType.World);
+                    _pointTypeDropdownOpen = false;
+                }
+                if (GUILayout.Button("Entity Point"))
+                {
+                    if (point.Type != CameraPathPointType.Entity)
+                        SetPathPointType(
+                            point, CameraPathPointType.Entity);
+                    _pointTypeDropdownOpen = false;
+                }
+                GUILayout.EndVertical();
+            }
+            if (point.Type == CameraPathPointType.Entity)
+                DrawEntityPointSettings(point);
+            GUILayout.Space(6f);
             int connection = point.NextPoint;
             string connectionLabel =
                 connection >= 0 &&
@@ -3785,6 +4393,195 @@ namespace CineKit
             GUILayout.EndVertical();
         }
 
+        private void SetPathPointType(
+            CameraPathPoint point, CameraPathPointType type)
+        {
+            Vector3 current = GetPointPosition(point);
+            Vector3 currentLookTarget = GetPointLookTarget(point);
+            point.Type = type;
+            _entityDropdownOpen = false;
+            if (type != CameraPathPointType.Entity)
+            {
+                Vector3 delta = current - point.Position;
+                point.Position = current;
+                point.LookTarget =
+                    currentLookTarget;
+                point.ResolvedPositionInitialized = false;
+                return;
+            }
+            Player player = _freecamPlayer;
+            if (player == null)
+                return;
+            Quaternion inverseYaw = Quaternion.Inverse(
+                GetEntityBodyRotation(player));
+            point.EntityProfileId = string.Empty;
+            point.EntityAttachment = EntityAttachmentPoint.Head;
+            point.EntityOffset =
+                inverseYaw *
+                (point.Position -
+                 GetEntityAttachmentPosition(
+                     player, point.EntityAttachment));
+            point.EntityAimOffset =
+                Quaternion.Inverse(GetEntityLookRotation(player)) *
+                (point.LookTarget - point.Position);
+            if (point.StayDuration <= 0f)
+                point.StayDuration = 5f;
+            point.ResolvedPosition = point.Position;
+            point.ResolvedPositionInitialized = true;
+        }
+
+        private void DrawEntityPointSettings(CameraPathPoint point)
+        {
+            Player selected = FindPathPointEntity(point);
+            string entityLabel = selected == null
+                ? "Target unavailable"
+                : selected == _freecamPlayer
+                    ? "Local Player"
+                    : selected.Profile.Nickname;
+            if (GUILayout.Button("Entity: " + entityLabel))
+                _entityDropdownOpen = !_entityDropdownOpen;
+            if (_entityDropdownOpen)
+            {
+                GUILayout.BeginVertical(GUI.skin.box);
+                GameWorld world = Singleton<GameWorld>.Instance;
+                if (world != null)
+                {
+                    DrawEntityChoice(point, world.MainPlayer);
+                    foreach (IPlayer candidate in world.RegisteredPlayers)
+                    {
+                        Player player = candidate as Player;
+                        if (player == null ||
+                            player == world.MainPlayer)
+                            continue;
+                        DrawEntityChoice(point, player);
+                    }
+                }
+                GUILayout.EndVertical();
+            }
+
+            int attachment = GUILayout.SelectionGrid(
+                (int)point.EntityAttachment,
+                new[] { "Head", "Chest" },
+                2);
+            if (attachment != (int)point.EntityAttachment &&
+                selected != null)
+            {
+                Vector3 current = GetPointPosition(point);
+                point.EntityAttachment =
+                    (EntityAttachmentPoint)attachment;
+                Quaternion rotation =
+                    point.FollowEntityLookDirection
+                        ? GetEntityLookRotation(selected)
+                        : GetEntityBodyRotation(selected);
+                point.EntityOffset =
+                    Quaternion.Inverse(rotation) *
+                    (current -
+                     GetEntityAttachmentPosition(
+                         selected, point.EntityAttachment));
+            }
+            bool followLook = GUILayout.Toggle(
+                point.FollowEntityLookDirection,
+                "Follow entity looking direction");
+            if (followLook != point.FollowEntityLookDirection &&
+                selected != null)
+                SetEntityFollowLookDirection(
+                    point, selected, followLook);
+            point.SwivelPathToNext = GUILayout.Toggle(
+                point.SwivelPathToNext,
+                "Swivel path toward next point");
+            GUILayout.Label(
+                "Keeps the attached segment facing its next point and " +
+                "shortens the curve as the points get closer.");
+
+            GUILayout.Label(
+                "Offset: X " + point.EntityOffset.x.ToString("0.00") +
+                "  Y " + point.EntityOffset.y.ToString("0.00") +
+                "  Z " + point.EntityOffset.z.ToString("0.00"));
+            GUILayout.Label(
+                "Drag this point normally in the world or curve editor " +
+                "to change its entity-relative offset.");
+            DrawPointSlider(
+                "Attachment Lerp",
+                ref point.AttachmentResponse,
+                0f, 30f, "");
+            DrawPointSlider(
+                "Attachment Speed",
+                ref point.AttachmentSpeed,
+                0f, 100f, " m/s");
+            GUILayout.Label(
+                "The point follows the entity's rotated XYZ offset. " +
+                "Lower values create more trailing lag; 0 removes that " +
+                "limit, so setting both to 0 follows exactly.");
+            if (GUILayout.Button("Set Offset From Current Camera") &&
+                selected != null)
+            {
+                Quaternion inverseYaw = Quaternion.Inverse(
+                    point.FollowEntityLookDirection
+                        ? GetEntityLookRotation(selected)
+                        : GetEntityBodyRotation(selected));
+                point.EntityOffset =
+                    inverseYaw *
+                    (_freePosition -
+                     GetEntityAttachmentPosition(
+                         selected, point.EntityAttachment));
+            }
+        }
+
+        private void SetEntityFollowLookDirection(
+            CameraPathPoint point, Player player, bool enabled)
+        {
+            Vector3 currentPosition = GetPointPosition(point);
+            Vector3 currentLookTarget = GetPointLookTarget(point);
+            Quaternion rotation = enabled
+                ? GetEntityLookRotation(player)
+                : GetEntityBodyRotation(player);
+            point.FollowEntityLookDirection = enabled;
+            point.EntityOffset = Quaternion.Inverse(rotation) *
+                (currentPosition -
+                 GetEntityAttachmentPosition(
+                     player, point.EntityAttachment));
+            if (enabled)
+                point.EntityAimOffset =
+                    Quaternion.Inverse(rotation) *
+                    (currentLookTarget - currentPosition);
+            else
+                point.LookTarget = point.Position +
+                    (currentLookTarget - currentPosition);
+        }
+
+        private void DrawEntityChoice(
+            CameraPathPoint point, Player player)
+        {
+            if (player == null)
+                return;
+            string label = player == _freecamPlayer
+                ? "Local Player"
+                : player.Profile.Nickname;
+            if (!GUILayout.Button(label))
+                return;
+            Vector3 current = GetPointPosition(point);
+            Vector3 currentLookTarget = GetPointLookTarget(point);
+            Quaternion inverseYaw = Quaternion.Inverse(
+                point.FollowEntityLookDirection
+                    ? GetEntityLookRotation(player)
+                    : GetEntityBodyRotation(player));
+            point.EntityProfileId = player == _freecamPlayer
+                ? string.Empty
+                : player.ProfileId;
+            point.EntityOffset =
+                inverseYaw *
+                (current -
+                 GetEntityAttachmentPosition(
+                     player, point.EntityAttachment));
+            if (point.FollowEntityLookDirection)
+                point.EntityAimOffset =
+                    inverseYaw *
+                    (currentLookTarget - current);
+            point.ResolvedPosition = current;
+            point.ResolvedPositionInitialized = true;
+            _entityDropdownOpen = false;
+        }
+
         private void SetPointConnection(
             int sourceIndex, int targetIndex)
         {
@@ -3796,9 +4593,11 @@ namespace CineKit
                 return;
             CameraPathPoint target = _pathPoints[targetIndex];
             Vector3 third =
-                (target.Position - source.Position) / 3f;
+                (GetPointPosition(target) -
+                 GetPointPosition(source)) / 3f;
             source.OutTangent = third;
             target.InTangent = -third;
+            UpdateEntityOutgoingConnection(source);
         }
 
         private void DrawCurveEditor(int id)
@@ -3849,12 +4648,13 @@ namespace CineKit
             maximum = new Vector2(float.MinValue, float.MinValue);
             foreach (CameraPathPoint point in _pathPoints)
             {
+                Vector3 pointPosition = GetPointPosition(point);
                 Vector3[] positions =
                 {
-                    point.Position,
-                    point.Position + point.InTangent,
-                    point.Position + point.OutTangent,
-                    point.LookTarget
+                    pointPosition,
+                    pointPosition + point.InTangent,
+                    pointPosition + point.OutTangent,
+                    GetPointLookTarget(point)
                 };
                 foreach (Vector3 position in positions)
                 {
@@ -3931,7 +4731,7 @@ namespace CineKit
             for (int i = 0; i < _pathPoints.Count - 1; i++)
             {
                 Vector2 previous = ProjectCurvePoint(
-                    _pathPoints[i].Position, rect, view,
+                    GetPointPosition(_pathPoints[i]), rect, view,
                     minimum, maximum);
                 for (int sample = 1; sample <= 24; sample++)
                 {
@@ -3951,14 +4751,15 @@ namespace CineKit
             for (int i = 0; i < _pathPoints.Count; i++)
             {
                 CameraPathPoint point = _pathPoints[i];
+                Vector3 pointPosition = GetPointPosition(point);
                 Vector2 center = ProjectCurvePoint(
-                    point.Position, rect, view,
+                    pointPosition, rect, view,
                     minimum, maximum);
                 Vector2 incoming = ProjectCurvePoint(
-                    point.Position + point.InTangent,
+                    pointPosition + point.InTangent,
                     rect, view, minimum, maximum);
                 Vector2 outgoing = ProjectCurvePoint(
-                    point.Position + point.OutTangent,
+                    pointPosition + point.OutTangent,
                     rect, view, minimum, maximum);
                 DrawGuiLine(
                     incoming, outgoing,
@@ -3972,7 +4773,7 @@ namespace CineKit
                     outgoing.x - 4f, outgoing.y - 4f, 8f, 8f), "");
 
                 Vector2 target = ProjectCurvePoint(
-                    point.LookTarget, rect, view,
+                    GetPointLookTarget(point), rect, view,
                     minimum, maximum);
                 DrawGuiLine(
                     center, target,
@@ -4039,11 +4840,12 @@ namespace CineKit
                 for (int i = 0; i < _pathPoints.Count; i++)
                 {
                     CameraPathPoint point = _pathPoints[i];
+                    Vector3 pointPosition = GetPointPosition(point);
                     Vector3[] candidates =
                     {
-                        point.Position,
-                        point.Position + point.InTangent,
-                        point.Position + point.OutTangent
+                        pointPosition,
+                        pointPosition + point.InTangent,
+                        pointPosition + point.OutTangent
                     };
                     for (int handle = 0; handle < 3; handle++)
                     {
@@ -4091,10 +4893,9 @@ namespace CineKit
             CameraPathPoint dragged =
                 _pathPoints[_curveDragPoint];
             if (_curveDragHandle == 0)
-            {
-                dragged.Position += delta;
-                dragged.LookTarget += delta;
-            }
+                SetPointWorldPosition(
+                    dragged,
+                    GetPointPosition(dragged) + delta);
             else if (_curveDragHandle == 1)
                 dragged.InTangent += delta;
             else
@@ -4108,7 +4909,8 @@ namespace CineKit
             foreach (CameraPathPoint point in _pathPoints)
             {
                 Vector3 direction =
-                    point.LookTarget - point.Position;
+                    GetPointLookTarget(point) -
+                    GetPointPosition(point);
                 direction.y = 0f;
                 if (direction.sqrMagnitude > 0.000001f)
                     averageForward += direction.normalized;
@@ -4168,7 +4970,11 @@ namespace CineKit
             GUILayout.BeginVertical(GUI.skin.box);
             GUILayout.BeginHorizontal();
             if (GUILayout.Toggle(
-                    selected, "Point " + (index + 1),
+                    selected,
+                    "Point " + (index + 1) +
+                    (point.Type == CameraPathPointType.Entity
+                        ? " [Entity]"
+                        : ""),
                     GUI.skin.button))
                 _selectedPathPoint = index;
             GUILayout.Label(
@@ -4245,7 +5051,8 @@ namespace CineKit
             for (int i = 0; i < _pathPoints.Count; i++)
             {
                 Vector3 screen = _gameCamera.WorldToScreenPoint(
-                    _pathPoints[i].Position + Vector3.up * 0.45f);
+                    GetPointPosition(_pathPoints[i]) +
+                    Vector3.up * 0.45f);
                 if (screen.z <= 0f)
                     continue;
                 Rect labelRect = new Rect(
@@ -4404,8 +5211,8 @@ namespace CineKit
                 return GetSegmentControlPosition(pointIndex) +
                        Vector3.up * 0.8f;
             if (handle == 3)
-                return point.LookTarget;
-            return point.Position + Vector3.up * 0.8f;
+                return GetPointLookTarget(point);
+            return GetPointPosition(point) + Vector3.up * 0.8f;
         }
 
         private void SetWorldHandlePosition(
@@ -4417,15 +5224,13 @@ namespace CineKit
                     pointIndex,
                     position - Vector3.up * 0.8f);
             else if (handle == 3)
-                point.LookTarget = position;
+                SetPointLookTargetWorld(point, position);
             else
             {
                 Vector3 newPointPosition =
                     position - Vector3.up * 0.8f;
-                Vector3 delta =
-                    newPointPosition - point.Position;
-                point.Position = newPointPosition;
-                point.LookTarget += delta;
+                SetPointWorldPosition(
+                    point, newPointPosition);
             }
         }
 
@@ -4434,10 +5239,12 @@ namespace CineKit
             CameraPathPoint from = _pathPoints[segment];
             int target = GetConnectionTarget(segment);
             CameraPathPoint to = _pathPoints[target];
+            Vector3 fromPosition = GetPointPosition(from);
+            Vector3 toPosition = GetPointPosition(to);
             Vector3 fromControl =
-                from.Position + from.OutTangent * 1.5f;
+                fromPosition + from.OutTangent * 1.5f;
             Vector3 toControl =
-                to.Position + to.InTangent * 1.5f;
+                toPosition + to.InTangent * 1.5f;
             return (fromControl + toControl) * 0.5f;
         }
 
@@ -4449,10 +5256,12 @@ namespace CineKit
             if (target < 0)
                 return;
             CameraPathPoint to = _pathPoints[target];
+            Vector3 fromPosition = GetPointPosition(from);
+            Vector3 toPosition = GetPointPosition(to);
             from.OutTangent =
-                (control - from.Position) * (2f / 3f);
+                (control - fromPosition) * (2f / 3f);
             to.InTangent =
-                (control - to.Position) * (2f / 3f);
+                (control - toPosition) * (2f / 3f);
         }
 
         private int GetConnectionTarget(int pointIndex)
@@ -4471,6 +5280,107 @@ namespace CineKit
             return -1;
         }
 
+        private void EnsureMenuCursorTexture()
+        {
+            if (_menuCursorTexture != null)
+                return;
+
+            // Unity displays software cursors at native texture size. A
+            // fixed 2:3 texture remains consistent on every screen aspect.
+            const int width = 14;
+            const int height = 21;
+            bool[,] fill = new bool[width, height];
+            Vector2[] shape =
+            {
+                new Vector2(1f, 1f),
+                new Vector2(1f, 17f),
+                new Vector2(5f, 13f),
+                new Vector2(8f, 20f),
+                new Vector2(11f, 19f),
+                new Vector2(7f, 12f),
+                new Vector2(13f, 12f)
+            };
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    bool inside = false;
+                    for (int current = 0, previous = shape.Length - 1;
+                         current < shape.Length;
+                         previous = current++)
+                    {
+                        Vector2 a = shape[current];
+                        Vector2 b = shape[previous];
+                        if ((a.y > y) != (b.y > y) &&
+                            x < (b.x - a.x) * (y - a.y) /
+                                (b.y - a.y) + a.x)
+                            inside = !inside;
+                    }
+                    fill[x, y] = inside;
+                }
+            }
+
+            Color32[] pixels = new Color32[width * height];
+            Color32 outline = new Color32(8, 10, 14, 255);
+            Color32 fillColor =
+                new Color32(242, 246, 252, 255);
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    bool filled = fill[x, y];
+                    bool bordered = false;
+                    if (!filled)
+                    {
+                        for (int offsetY = -1;
+                             offsetY <= 1 && !bordered;
+                             offsetY++)
+                        {
+                            for (int offsetX = -1;
+                                 offsetX <= 1;
+                                 offsetX++)
+                            {
+                                int sampleX = x + offsetX;
+                                int sampleY = y + offsetY;
+                                if (sampleX >= 0 &&
+                                    sampleX < width &&
+                                    sampleY >= 0 &&
+                                    sampleY < height &&
+                                    fill[sampleX, sampleY])
+                                {
+                                    bordered = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    pixels[
+                        (height - 1 - y) * width + x] =
+                        filled
+                            ? fillColor
+                            : bordered
+                                ? outline
+                                : new Color32(0, 0, 0, 0);
+                }
+            }
+
+            _menuCursorTexture = new Texture2D(
+                width,
+                height,
+                TextureFormat.RGBA32,
+                false)
+            {
+                name = "CineKit Menu Cursor",
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp,
+                hideFlags = HideFlags.HideAndDontSave
+            };
+            _menuCursorTexture.SetPixels32(pixels);
+            _menuCursorTexture.Apply(false, false);
+            _textures.Add(_menuCursorTexture);
+        }
+
         private void SetMenuOpen(bool open)
         {
             if (_menuOpen == open)
@@ -4487,6 +5397,14 @@ namespace CineKit
             }
             else
             {
+                if (_menuCursorApplied)
+                {
+                    Cursor.SetCursor(
+                        null,
+                        Vector2.zero,
+                        CursorMode.Auto);
+                    _menuCursorApplied = false;
+                }
                 Cursor.lockState = _freecamEnabled.Value
                     ? CursorLockMode.Locked : _savedCursorLock;
                 Cursor.visible = _freecamEnabled.Value
@@ -4504,6 +5422,18 @@ namespace CineKit
                 Cursor.lockState = CursorLockMode.None;
             if (!Cursor.visible)
                 Cursor.visible = true;
+
+            // Reapply every frame because another open menu can replace or
+            // clear Unity's single shared cursor.
+            EnsureMenuCursorTexture();
+            if (_menuCursorTexture != null)
+            {
+                Cursor.SetCursor(
+                    _menuCursorTexture,
+                    Vector2.zero,
+                    CursorMode.ForceSoftware);
+                _menuCursorApplied = true;
+            }
         }
 
         private void HandleMenuShortcutUpdate()
@@ -5172,10 +6102,19 @@ namespace CineKit
 
         private void DestroySkin()
         {
+            if (_menuCursorApplied)
+            {
+                Cursor.SetCursor(
+                    null,
+                    Vector2.zero,
+                    CursorMode.Auto);
+                _menuCursorApplied = false;
+            }
             if (_skin != null) Destroy(_skin);
             _skin = null;
             _tabStyle = null;
             _headingStyle = null;
+            _menuCursorTexture = null;
             foreach (Texture2D texture in _textures)
                 if (texture != null) Destroy(texture);
             _textures.Clear();
@@ -5192,6 +6131,8 @@ namespace CineKit
                 OnControlPlayerFromFreecamChanged;
             _freecamAntialiasing.SettingChanged -=
                 OnFreecamAntialiasingChanged;
+            _hideRaidHud.SettingChanged -=
+                OnHideRaidHudChanged;
             _grassRenderDistance.SettingChanged -=
                 OnGrassRenderDistanceChanged;
             _accentColor.SettingChanged -= OnAccentChanged;
