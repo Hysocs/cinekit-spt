@@ -83,8 +83,8 @@ namespace CineKit
         private Vector3 _sourceCameraLocalPosition;
         private Quaternion _sourceCameraLocalRotation;
         private Vector3 _sourceCameraLocalScale;
-        private readonly List<BodyRendererDataStruct> _localBodyGroups =
-            new List<BodyRendererDataStruct>(16);
+        private readonly List<BodyRenderer> _localBodyGroups =
+            new List<BodyRenderer>(16);
         private readonly List<BodyRendererState> _localBodyStates =
             new List<BodyRendererState>(32);
         private readonly HashSet<int> _localBodyRendererIds =
@@ -92,6 +92,8 @@ namespace CineKit
         private bool _localBodyRenderOverridden;
         private int _nativeCameraCullingMask;
         private Player _freecamPlayer;
+        private EPointOfView _savedPlayerPointOfView;
+        private bool _playerPointOfViewOverridden;
         private bool _freecamWeaponHidden;
         private float _freecamPlayerEyeHeight = 1.6f;
         private bool _smoothingExpanded;
@@ -600,9 +602,10 @@ namespace CineKit
             if (world == null || world.MainPlayer == null)
                 return false;
 
-            CameraClass eftCameraService = CameraClass.Instance;
-            Camera source = eftCameraService != null
-                ? eftCameraService.Camera
+            EFT.CameraControl.CameraManager cameraManager =
+                EFT.CameraControl.CameraManager.Instance;
+            Camera source = cameraManager != null
+                ? cameraManager.Camera
                 : null;
             if (source == null)
                 return false;
@@ -628,6 +631,8 @@ namespace CineKit
             _renderPoseInitialized = true;
             _renderPoseFrame = -1;
             _freecamPlayer = world.MainPlayer;
+            if (!_playerFollowsFreecam.Value)
+                ShowLocalPlayerThirdPerson();
             _freecamPlayerEyeHeight = Mathf.Clamp(
                 sourceTransform.position.y -
                 _freecamPlayer.Position.y,
@@ -654,7 +659,7 @@ namespace CineKit
                 if (_playerFollowsFreecam.Value)
                     HideLocalPlayerBody();
                 else
-                    RestoreLocalBodyRenderers();
+                    ShowLocalThirdPersonBody();
                 UpdateEnvironmentCullingPosition();
                 UpdateIndoorCullingPosition();
             }
@@ -679,6 +684,7 @@ namespace CineKit
 
         private void HideLocalPlayerBody()
         {
+            RestoreLocalPlayerPointOfView();
             if (_localBodyRenderOverridden)
             {
                 if (_freecamPlayer != null)
@@ -707,13 +713,11 @@ namespace CineKit
             _nativeCameraCullingMask = _gameCamera.cullingMask;
             _localBodyRenderOverridden = true;
             player.PlayerBody.GetBodyRenderersNonAlloc(_localBodyGroups);
-
             for (int i = 0; i < _localBodyGroups.Count; i++)
             {
                 Renderer[] renderers = _localBodyGroups[i].Renderers;
                 if (renderers == null)
                     continue;
-
                 for (int j = 0; j < renderers.Length; j++)
                     SetLocalRendererState(renderers[j], false);
             }
@@ -730,6 +734,44 @@ namespace CineKit
                 player.HideWeapon();
                 _freecamWeaponHidden = true;
             }
+        }
+
+        private void ShowLocalThirdPersonBody()
+        {
+            RestoreLocalBodyRenderers();
+            ShowLocalPlayerThirdPerson();
+
+            Player player = _freecamPlayer;
+            if (player == null || player.PlayerBody == null ||
+                _gameCamera == null)
+                return;
+
+            _localBodyGroups.Clear();
+            _localBodyRendererIds.Clear();
+            _nativeCameraCullingMask = _gameCamera.cullingMask;
+            _localBodyRenderOverridden = true;
+            player.PlayerBody.GetBodyRenderersNonAlloc(_localBodyGroups);
+
+            int bodyLayerMask = 0;
+            for (int i = 0; i < _localBodyGroups.Count; i++)
+            {
+                Renderer[] renderers = _localBodyGroups[i].Renderers;
+                if (renderers == null)
+                    continue;
+                for (int j = 0; j < renderers.Length; j++)
+                {
+                    Renderer renderer = renderers[j];
+                    // Third-person POV disables the first-person arms/body
+                    // renderers. Do not resurrect those while overriding
+                    // the freecam's otherwise-excluded player layers.
+                    if (renderer == null || !renderer.enabled)
+                        continue;
+                    if (!SetLocalRendererState(renderer, true))
+                        continue;
+                    bodyLayerMask |= 1 << renderer.gameObject.layer;
+                }
+            }
+            _gameCamera.cullingMask |= bodyLayerMask;
         }
 
         private bool SetLocalRendererState(Renderer renderer, bool visible)
@@ -776,6 +818,28 @@ namespace CineKit
             _localBodyStates.Clear();
             _localBodyRendererIds.Clear();
             _localBodyRenderOverridden = false;
+        }
+
+        private void ShowLocalPlayerThirdPerson()
+        {
+            if (_freecamPlayer == null)
+                return;
+            if (!_playerPointOfViewOverridden)
+            {
+                _savedPlayerPointOfView = _freecamPlayer.PointOfView;
+                _playerPointOfViewOverridden = true;
+            }
+            if (_freecamPlayer.PointOfView != EPointOfView.ThirdPerson)
+                _freecamPlayer.PointOfView = EPointOfView.ThirdPerson;
+        }
+
+        private void RestoreLocalPlayerPointOfView()
+        {
+            if (!_playerPointOfViewOverridden)
+                return;
+            if (_freecamPlayer != null)
+                _freecamPlayer.PointOfView = _savedPlayerPointOfView;
+            _playerPointOfViewOverridden = false;
         }
 
         private void SyncPlayerToFreeCamera()
@@ -2961,7 +3025,7 @@ namespace CineKit
                    game.InRaid &&
                    game.GameTimer != null &&
                    game.GameTimer.Status ==
-                   GameTimerClass.EGameTimerStatus.Started;
+                   EFT.GameTimer.EGameTimerStatus.Started;
         }
 
         private void OnFreecamSettingChanged(object sender, EventArgs args)
@@ -2986,11 +3050,13 @@ namespace CineKit
                 return;
             if (_playerFollowsFreecam.Value)
             {
+                RestoreLocalPlayerPointOfView();
                 SyncPlayerToFreeCamera();
                 HideLocalPlayerBody();
             }
             else
             {
+                ShowLocalPlayerThirdPerson();
                 RestoreLocalBodyRenderers();
             }
         }
@@ -3135,16 +3201,11 @@ namespace CineKit
             ScheduleGrassSpatialRefresh();
         }
 
-        private static GraphicsSettingsClass GetGraphicsSettings()
-        {
-            SharedGameSettingsClass shared =
-                Singleton<SharedGameSettingsClass>.Instance;
-            return shared?.Graphics?.Settings;
-        }
-
         private void ApplyFreecamGraphicsProfile()
         {
-            GraphicsSettingsClass settings = GetGraphicsSettings();
+            EFT.Settings.SettingsManager manager =
+                Singleton<EFT.Settings.SettingsManager>.Instance;
+            var settings = manager?.Graphics?.Settings;
             if (settings == null)
             {
                 Logger.LogWarning(
@@ -3204,7 +3265,8 @@ namespace CineKit
             EFSR2Mode fsr2,
             EFSR3Mode fsr3)
         {
-            CameraClass cameraService = CameraClass.Instance;
+            EFT.CameraControl.CameraManager cameraService =
+                EFT.CameraControl.CameraManager.Instance;
             if (cameraService != null)
                 cameraService.SetAntiAliasing(
                     antialiasing, dlss, fsr2, fsr3);
@@ -3215,7 +3277,9 @@ namespace CineKit
             if (!_graphicsProfileCaptured)
                 return;
 
-            GraphicsSettingsClass settings = GetGraphicsSettings();
+            EFT.Settings.SettingsManager manager =
+                Singleton<EFT.Settings.SettingsManager>.Instance;
+            var settings = manager?.Graphics?.Settings;
             if (settings != null)
             {
                 settings.AntiAliasing.Value = _savedAntialiasing;
@@ -3260,6 +3324,11 @@ namespace CineKit
                     _sourceCamera.enabled = _sourceCameraWasEnabled;
                 }
             }
+            // Move EFT's real camera and its visibility observers back to
+            // the player before changing POV. The POV setter immediately
+            // refreshes several render systems using the camera position.
+            RestorePlayerCullingPosition();
+            RestoreLocalPlayerPointOfView();
             RestorePlayerCullingPosition();
             RestoreIndoorCulling();
             RestoreCrossSceneMeshVisibility();
@@ -3291,7 +3360,10 @@ namespace CineKit
                     Koenigz.PerfectCulling.EFT
                         .PerfectCullingCrossSceneSampler.Instance;
                 if (sampler != null && sampler.CullingCamera != null)
+                {
                     sampler.CullingCamera.ObservePosition = position;
+                    sampler.CullingCamera.SetDirty();
+                }
             }
 
             EFT.EnvironmentEffect.EnvironmentManager manager =
@@ -5532,14 +5604,15 @@ namespace CineKit
                     nameof(Koenigz.PerfectCulling
                         .PerfectCullingCamera.ObservePosition)),
                 nameof(OverrideCullingObservePosition));
-            Patch(AccessTools.Method(typeof(CameraClass),
-                nameof(CameraClass.ForceSetPosition)),
+            Patch(AccessTools.Method(
+                    typeof(EFT.CameraControl.CameraManager),
+                    nameof(EFT.CameraControl.CameraManager.ForceSetPosition)),
                 nameof(BlockForcedCameraPosition));
             Patch(AccessTools.Method(
                 typeof(EFT.CameraControl.PlayerCameraController),
                 "LateUpdate"), nameof(ReapplyFreeCameraPose), true);
             Patch(AccessTools.Method(
-                typeof(EFT.EnvironmentEffect.EnvironmentManager),
+                    typeof(EFT.EnvironmentEffect.EnvironmentManager),
                     nameof(EFT.EnvironmentEffect.EnvironmentManager
                         .SetTriggerForPlayer)),
                 nameof(OverrideLocalPlayerEnvironmentTrigger));
