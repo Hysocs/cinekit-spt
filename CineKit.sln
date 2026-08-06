@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.10.34928.147
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CineKit", "CineKit.csproj", "{BD56E4B8-7741-45B7-800E-016278C35DB5}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CineKit.Client", "Client\CineKit.Client.csproj", "{BD56E4B8-7741-45B7-800E-016278C35DB5}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

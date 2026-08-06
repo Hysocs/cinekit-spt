@@ -2,6 +2,11 @@
 
 CineKit is a detached cinematic free-camera mod for SPT 4.0.
 
+## Repository layout
+
+- `Client/` — BepInEx client plugin, schematics, and client project
+- `dist/` — generated release packages
+
 ## Features
 
 - Moves EFT's active raid camera while leaving it in its original hierarchy
